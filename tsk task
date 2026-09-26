@@ -936,13 +936,13 @@ That means the web application doesn't need to run the large image model itself.
 
 28. Initial Infrastructure Direction
 
-A likely initial setup:
+The initial production deployment is explicitly split into a frontend/control UI and a backend/orchestrator.
 
-Frontend
+Frontend / Ostra Studio website + dashboard
 → Vercel
 
-Backend / API
-→ lightweight server/runtime
+Backend / API + Orchestrator
+→ Render
 
 Database
 → Supabase Postgres
