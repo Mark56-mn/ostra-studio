@@ -200,3 +200,49 @@ The architecture may later support:
 - additional image/voice providers
 
 Do not implement future workers until the core production path needs them.
+
+
+## External runtime supervisor
+
+The scheduler is part of the Render control plane and supervises temporary production runtimes.
+
+```text
+                    RENDER CONTROL PLANE
+                           |
+                    RUNTIME SUPERVISOR
+                    /        |        \
+                   /         |         \
+             Kaggle       Colab       Colab
+             Script       Image        Voice
+                |            |           |
+                +------------+-----------+
+                             |
+                       registration
+                        + heartbeat
+                             |
+                       ORCHESTRATOR
+```
+
+A schedule fires a startup request; it does not itself establish worker availability. A worker becomes ONLINE only after registration and health validation.
+
+Each runtime starter implements a replaceable capability such as:
+`startRuntime(workerType, runtimeConfig)`.
+
+The scheduler owns:
+- schedules
+- timezone conversion
+- startup leases
+- duplicate protection
+- retries
+- startup history
+- next/last run
+- runtime lifecycle state
+
+The worker owns:
+- service startup
+- registration
+- endpoint publication
+- heartbeat
+- health response
+
+For tunnel-based workers, the endpoint may change between sessions and must be updated through registration.
