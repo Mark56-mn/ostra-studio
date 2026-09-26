@@ -1,0 +1,1346 @@
+Absolutely. We should treat this as the master specification for the project before we touch individual integrations.
+
+I’ll call the system Ostra Studio for now: the production/control platform for your original manhwa YouTube channel.
+
+OSTRA STUDIO — PROJECT BLUEPRINT & CONSTRAINTS
+
+Document: Master Project Blueprint v1.0
+Purpose: Autonomous/semi-autonomous production of original manhwa storytelling videos for YouTube
+Initial publishing cadence: 1 finished video per week
+Human role: Creator, director, final approver
+AI role: Production workers and assistants
+
+
+---
+
+1. Core Vision
+
+Ostra Studio is a production platform that coordinates multiple specialized AI workers to transform an original story created by the user into a finished YouTube video.
+
+The system must eventually be able to:
+
+USER STORY / IDEA
+       ↓
+STORY DEVELOPMENT
+       ↓
+SCRIPT
+       ↓
+SCENE BREAKDOWN
+       ↓
+IMAGE GENERATION
+       ↓
+NARRATION / VOICE
+       ↓
+VIDEO ASSEMBLY
+       ↓
+QUALITY CONTROL
+       ↓
+HUMAN APPROVAL
+       ↓
+YOUTUBE
+       ↓
+ANALYTICS
+
+The system should be designed so that the individual AI models can be replaced without rebuilding the platform.
+
+
+---
+
+2. Primary Components
+
+Ostra Studio consists of:
+
+A. Ostra Studio Dashboard
+
+The website through which the user controls the entire system.
+
+B. Orchestrator
+
+The central workflow manager.
+
+It decides:
+
+what task needs to happen
+
+which worker performs it
+
+what context the worker receives
+
+what artifacts are expected
+
+what happens after completion
+
+what happens when something fails
+
+what is waiting for human approval
+
+
+C. Script AI
+
+Initial runtime:
+
+Kaggle Notebook
+
+Primary responsibility:
+
+story development
+
+script writing
+
+scene planning
+
+dialogue
+
+narration text
+
+image prompts
+
+story continuity
+
+research/tools where authorized
+
+communicating production requirements
+
+
+D. Image AI
+
+Initial runtime:
+
+Google Colab
+
+Primary responsibility:
+
+character images
+
+environments
+
+scenes
+
+visual assets
+
+thumbnails
+
+other requested artwork
+
+
+E. Voice AI
+
+Initial provider:
+
+Kokoro-82M
+
+Initial runtime:
+
+Google Colab
+
+Responsibilities:
+
+narration
+
+dialogue
+
+scene audio
+
+voice generation
+
+
+Alternative providers must be supported architecturally, including ElevenLabs and other future providers.
+
+F. Video Engine
+
+Deterministic production layer.
+
+Primary technology:
+
+FFmpeg
+
+Responsibilities:
+
+combine images
+
+synchronize narration
+
+subtitles
+
+transitions
+
+music
+
+sound effects
+
+video encoding
+
+thumbnail preparation
+
+
+G. Storage
+
+Initial candidate:
+
+Supabase Storage + Supabase Postgres
+
+Storage should contain both production assets and structured metadata.
+
+H. YouTube Integration
+
+Responsibilities:
+
+upload approved videos
+
+title
+
+description
+
+thumbnail
+
+metadata
+
+publishing status
+
+YouTube video ID
+
+analytics retrieval where available
+
+
+
+---
+
+3. Fundamental Design Principle
+
+No hard-coded AI provider
+
+The application must never assume that one model/provider is permanent.
+
+Bad:
+
+Kaggle = Script AI forever
+
+Good:
+
+Script Worker
+     ↓
+Provider Adapter
+     ↓
+Current Runtime
+
+Therefore:
+
+ScriptProvider
+ImageProvider
+VoiceProvider
+
+must be replaceable.
+
+
+---
+
+4. No Mock Mode
+
+This is a hard constraint.
+
+The production system must not contain fake AI workers pretending to have completed real work.
+
+Do not implement:
+
+MockScriptAgent
+MockImageAgent
+MockVoiceAgent
+MockVideoAgent
+
+Do not create fake successful responses merely to make the UI look functional.
+
+If a real service is unavailable:
+
+STATUS = OFFLINE
+
+or:
+
+STATUS = FAILED
+
+or:
+
+STATUS = WAITING
+
+The UI must tell the truth.
+
+
+---
+
+5. Real-Service-First Development
+
+We should build the architecture around real interfaces and real contracts.
+
+For example:
+
+Kaggle unavailable
+        ↓
+Script Worker = OFFLINE
+
+rather than:
+
+Kaggle unavailable
+        ↓
+pretend script was generated
+
+This means every integration should expose its actual state.
+
+
+---
+
+6. Agent State Model
+
+Every worker must have an observable state.
+
+Minimum states:
+
+OFFLINE
+CONNECTING
+ONLINE
+IDLE
+QUEUED
+WORKING
+WAITING
+COMPLETED
+FAILED
+RETRYING
+
+Example:
+
+SCRIPT AI
+Status: WORKING
+Runtime: Kaggle
+Task: Episode 004
+Started: 14:32
+
+
+---
+
+7. Agent Communication
+
+The agents should communicate through the Orchestrator, not directly through uncontrolled model-to-model conversations.
+
+Architecture:
+
+ORCHESTRATOR
+              /     |      \
+             /      |       \
+            ↓       ↓        ↓
+        SCRIPT    IMAGE     VOICE
+         AI        AI        AI
+
+The Orchestrator owns:
+
+task creation
+
+task assignment
+
+context
+
+messages
+
+results
+
+artifacts
+
+retries
+
+dependencies
+
+status
+
+
+This prevents one AI from becoming the hidden controller of the entire system.
+
+
+---
+
+8. Shared Production Context
+
+Each story/project needs a persistent context.
+
+Example:
+
+PROJECT
+│
+├── Story Bible
+│
+├── Characters
+│
+├── Locations
+│
+├── World Rules
+│
+├── Timeline
+│
+├── Episodes
+│
+├── Scenes
+│
+├── Visual Style
+│
+└── Production Settings
+
+The AI should not need to rediscover the entire story every time.
+
+
+---
+
+9. Story Bible
+
+Every original manhwa project should have a structured Story Bible.
+
+It can contain:
+
+World
+
+world name
+
+setting
+
+geography
+
+factions
+
+cultures
+
+technology
+
+supernatural rules
+
+
+Characters
+
+name
+
+age where relevant
+
+appearance
+
+personality
+
+abilities
+
+relationships
+
+character development
+
+visual reference
+
+
+Story
+
+premise
+
+major conflicts
+
+arcs
+
+timeline
+
+important events
+
+unresolved mysteries
+
+
+Visual identity
+
+art direction
+
+character style
+
+environment style
+
+lighting
+
+aspect ratio
+
+color/visual rules
+
+
+
+---
+
+10. Episode Architecture
+
+Each episode should become a structured production object.
+
+EPISODE
+│
+├── Concept
+├── Outline
+├── Script
+├── Narration
+├── Characters
+├── Scenes
+├── Image Requests
+├── Generated Images
+├── Audio
+├── Video
+├── Thumbnail
+├── QC
+├── Approval
+└── YouTube
+
+
+---
+
+11. Scene Architecture
+
+Each scene should have structured information.
+
+SCENE
+│
+├── Scene ID
+├── Story purpose
+├── Characters
+├── Location
+├── Time
+├── Environment
+├── Action
+├── Dialogue
+├── Narration
+├── Camera direction
+├── Visual instructions
+├── Image prompt
+├── Image result
+├── Audio
+└── Video timing
+
+This is extremely important for keeping the three production AIs synchronized.
+
+
+---
+
+12. AI Communication UI
+
+The dashboard should contain an Agent Room.
+
+Example:
+
+┌─────────────────────────────────────────┐
+│ AGENT ROOM                              │
+├─────────────────────────────────────────┤
+│ SCRIPT AI                               │
+│ ✓ Episode outline completed             │
+│                                         │
+│ → Sending Scene 08 specification        │
+│                                         │
+│ IMAGE AI                                │
+│ ✓ Received Scene 08                     │
+│ → Generating visual asset               │
+│                                         │
+│ VOICE AI                                │
+│ ○ Waiting for approved narration        │
+└─────────────────────────────────────────┘
+
+Users should be able to see:
+
+messages
+
+task status
+
+tool calls
+
+artifacts
+
+errors
+
+dependencies
+
+timestamps
+
+
+
+---
+
+13. Reasoning Visibility Constraint
+
+The interface should not expose hidden chain-of-thought verbatim.
+
+Instead, show useful operational reasoning such as:
+
+Decision:
+Scene 8 requires a character reference.
+
+Reason:
+The character appears in the previous scene and
+visual consistency is required.
+
+Action:
+Request character reference image.
+
+This provides transparency without exposing private internal reasoning.
+
+
+---
+
+14. Voice System
+
+Voice generation must be provider-independent.
+
+Architecture:
+
+Voice Engine
+│
+├── Kokoro
+├── Piper
+├── ElevenLabs
+└── Future providers
+
+Initial target:
+
+Kokoro-82M
+
+ElevenLabs is optional, not mandatory.
+
+The user must eventually be able to select the provider and voice from Settings.
+
+
+---
+
+15. Voice Production
+
+Voice should be generated at the scene/segment level when practical.
+
+Scene 01 → audio_01.wav
+Scene 02 → audio_02.wav
+Scene 03 → audio_03.wav
+
+rather than generating one enormous audio file immediately.
+
+Advantages:
+
+easier regeneration
+
+easier synchronization
+
+easier correction
+
+easier character changes
+
+easier video editing
+
+
+
+---
+
+16. Image Generation
+
+Image AI receives structured scene specifications, not just raw prompts.
+
+Example:
+
+Scene:
+07
+
+Character:
+Kai
+
+Appearance:
+[reference ID]
+
+Location:
+Abandoned city
+
+Weather:
+Heavy rain
+
+Time:
+Night
+
+Action:
+Kai discovers the artifact.
+
+Mood:
+Suspenseful
+
+Camera:
+Medium shot
+
+Visual style:
+Project default
+
+This allows the Image AI to remain focused on image generation.
+
+
+---
+
+17. Asset Management
+
+Every generated asset must have metadata.
+
+Example:
+
+asset_id
+project_id
+episode_id
+scene_id
+asset_type
+provider
+model
+status
+storage_location
+created_at
+version
+
+Never overwrite an important asset without versioning.
+
+Example:
+
+scene_07_v1
+scene_07_v2
+scene_07_v3
+
+
+---
+
+18. Human Approval Gate
+
+The default publishing workflow is:
+
+GENERATED
+   ↓
+QUALITY CONTROL
+   ↓
+READY FOR REVIEW
+   ↓
+USER APPROVAL
+   ↓
+YOUTUBE
+
+The user must be able to:
+
+Approve
+
+Continue toward publishing.
+
+Reject
+
+Stop the production.
+
+Request Changes
+
+Send feedback back into the workflow.
+
+Regenerate
+
+Regenerate selected assets.
+
+
+---
+
+19. No Automatic Publishing by Default
+
+The system must never automatically publish a video unless the user explicitly enables automatic publishing.
+
+Default:
+
+AUTO_PUBLISH = false
+
+
+---
+
+20. Video Storage
+
+Finished videos should remain available while waiting for approval.
+
+Example:
+
+/storage/projects/project_001/
+    episode_001/
+        images/
+        audio/
+        subtitles/
+        thumbnail/
+        draft/
+        final/
+
+The system should not immediately delete the production assets after rendering.
+
+
+---
+
+21. YouTube Upload
+
+Once approved:
+
+Approved Video
+      ↓
+Upload Queue
+      ↓
+YouTube
+      ↓
+Published/Uploaded
+      ↓
+Store YouTube ID
+
+The database records:
+
+youtube_video_id
+upload_status
+published_at
+youtube_url
+title
+description
+thumbnail
+
+
+---
+
+22. YouTube Analytics
+
+Eventually Ostra should retrieve metrics such as:
+
+views
+
+watch time
+
+average view duration
+
+impressions
+
+click-through rate
+
+subscribers gained
+
+audience retention
+
+
+These metrics should be used as information for the creator and production system, not as an excuse for uncontrolled autonomous changes.
+
+
+---
+
+23. Scheduler
+
+The system needs a scheduler.
+
+Initial target:
+
+1 VIDEO / WEEK
+
+But the architecture should support:
+
+1/week
+2/week
+3/week
+daily
+manual
+
+without restructuring the application.
+
+
+---
+
+24. Failure Handling
+
+Every external service can fail.
+
+Therefore:
+
+Kaggle disconnects
+       ↓
+Task remains QUEUED
+       ↓
+No data loss
+       ↓
+Reconnect
+       ↓
+Resume
+
+Same principle for:
+
+Colab
+
+Supabase
+
+YouTube
+
+voice provider
+
+image provider
+
+storage
+
+webhooks
+
+
+
+---
+
+25. No Destructive Failure
+
+A failed task must not destroy previous successful work.
+
+Example:
+
+Episode 004
+
+Script ✓
+Scenes ✓
+Images ✓
+Voice ✓
+Video ✕
+
+The system should allow video rendering to resume/retry without regenerating everything.
+
+
+---
+
+26. Cost Constraints
+
+Initial system should prioritize:
+
+1. Free services
+
+
+2. Free tiers
+
+
+3. Open-source models
+
+
+4. Local/self-hosted models where practical
+
+
+5. Existing Kaggle/Colab resources
+
+
+6. Minimal paid APIs
+
+
+
+Paid services should be optional integrations, not architectural dependencies unless absolutely necessary.
+
+
+---
+
+27. Infrastructure Philosophy
+
+The control plane should be lightweight.
+
+Frontend
+    ↓
+API / Orchestrator
+    ↓
+Database
+    ↓
+External AI runtimes
+
+The heavy AI computation should remain outside the main web server whenever practical.
+
+That means the web application doesn't need to run the large image model itself.
+
+
+---
+
+28. Initial Infrastructure Direction
+
+A likely initial setup:
+
+Frontend
+→ Vercel
+
+Backend / API
+→ lightweight server/runtime
+
+Database
+→ Supabase Postgres
+
+File Storage
+→ Supabase Storage
+
+Script AI
+→ Kaggle
+
+Image AI
+→ Colab
+
+Voice AI
+→ Colab + Kokoro
+
+Video rendering
+→ dedicated worker/runtime
+
+YouTube
+→ YouTube API
+
+We can change individual pieces later.
+
+
+---
+
+29. Security Constraints
+
+Never put:
+
+YouTube secrets
+
+API keys
+
+service credentials
+
+Supabase service-role keys
+
+model credentials
+
+
+inside frontend code.
+
+Secrets must remain server-side or inside the appropriate runtime secret manager.
+
+
+---
+
+30. Phone-First Requirement
+
+Because the system will be managed primarily from your Android phone, the dashboard must be:
+
+mobile-first
+
+responsive
+
+usable on small screens
+
+lightweight
+
+touch-friendly
+
+capable of previewing videos
+
+capable of approving/rejecting production
+
+
+Desktop can be supported, but it must not be required for normal operation.
+
+
+---
+
+31. Plugin Architecture
+
+Tools should be added through adapters.
+
+For example:
+
+Tool Registry
+│
+├── Web Search
+├── YouTube
+├── Storage
+├── Image Generation
+├── Voice
+├── Video Rendering
+├── Notifications
+└── Future Tools
+
+The Script AI should not need to know how every integration works internally.
+
+It requests:
+
+tool: image.generate
+
+The orchestrator routes that request to the configured provider.
+
+
+---
+
+32. Future Agent Expansion
+
+The architecture should allow additional workers later:
+
+SCRIPT AI
+IMAGE AI
+VOICE AI
+VIDEO AI
+RESEARCH AI
+THUMBNAIL AI
+SEO AI
+ANALYTICS AI
+COMMUNITY AI
+
+But we do not build all of these now.
+
+The architecture supports them without requiring them initially.
+
+
+---
+
+33. Initial Production Pipeline
+
+Our first real production pipeline should ultimately be:
+
+1. USER CREATES STORY
+          ↓
+2. SCRIPT AI
+          ↓
+3. EPISODE SCRIPT
+          ↓
+4. SCENE BREAKDOWN
+          ↓
+5. IMAGE AI
+          ↓
+6. SCENE IMAGES
+          ↓
+7. VOICE AI
+          ↓
+8. NARRATION
+          ↓
+9. VIDEO ENGINE
+          ↓
+10. QUALITY CONTROL
+          ↓
+11. STORAGE
+          ↓
+12. USER REVIEW
+          ↓
+13. APPROVAL
+          ↓
+14. YOUTUBE UPLOAD
+          ↓
+15. ANALYTICS
+
+
+---
+
+34. Development Order
+
+This is the order I recommend we follow:
+
+Phase 1 — Foundation
+
+Build:
+
+project management
+
+story management
+
+episode management
+
+database schema
+
+asset model
+
+task model
+
+agent model
+
+event/activity model
+
+approval model
+
+
+No fake AI.
+
+
+---
+
+Phase 2 — Orchestrator
+
+Build the real:
+
+task queue
+
+task dependencies
+
+worker registration
+
+worker heartbeat
+
+task status
+
+retries
+
+event logging
+
+communication system
+
+
+
+---
+
+Phase 3 — Agent Room
+
+Build the real-time dashboard showing:
+
+agents
+
+status
+
+tasks
+
+messages
+
+events
+
+errors
+
+artifacts
+
+
+
+---
+
+Phase 4 — Kaggle Connection
+
+Connect your real existing Script AI.
+
+No replacement model unless necessary.
+
+
+---
+
+Phase 5 — Colab Image Connection
+
+Connect the actual image-generation model.
+
+
+---
+
+Phase 6 — Voice
+
+Start with:
+
+Kokoro
+
+Then make ElevenLabs/Piper additional adapters.
+
+
+---
+
+Phase 7 — Video Engine
+
+Build the actual FFmpeg pipeline.
+
+
+---
+
+Phase 8 — Review
+
+Implement:
+
+video player
+
+asset browser
+
+approval
+
+rejection
+
+change request
+
+regeneration
+
+
+
+---
+
+Phase 9 — YouTube
+
+Connect real YouTube upload/authentication.
+
+
+---
+
+Phase 10 — Automation
+
+Only after the complete manual pipeline works:
+
+Scheduler
+      ↓
+Episode
+      ↓
+Agents
+      ↓
+Video
+      ↓
+Review
+      ↓
+YouTube
+
+
+---
+
+35. Absolute Project Constraints
+
+These should go into the repository as NON-NEGOTIABLE constraints:
+
+1. NO MOCK MODE.
+
+2. NO FAKE AI RESULTS.
+
+3. NO FAKE SUCCESS STATES.
+
+4. REAL SERVICES MUST REPORT THEIR REAL STATUS.
+
+5. AI PROVIDERS MUST BE REPLACEABLE.
+
+6. KAGGLE MUST NOT BECOME A HARD ARCHITECTURAL DEPENDENCY.
+
+7. COLAB MUST NOT BECOME A HARD ARCHITECTURAL DEPENDENCY.
+
+8. ELEVENLABS MUST NOT BE A REQUIRED VOICE PROVIDER.
+
+9. KOKORO SHOULD BE THE INITIAL FREE VOICE OPTION.
+
+10. USER APPROVAL IS REQUIRED BEFORE PUBLISHING BY DEFAULT.
+
+11. FAILED TASKS MUST NOT DESTROY SUCCESSFUL WORK.
+
+12. PRODUCTION ASSETS MUST BE VERSIONED.
+
+13. LARGE FILES MUST NOT BE STORED DIRECTLY IN DATABASE ROWS.
+
+14. SECRETS MUST NEVER BE EXPOSED TO THE FRONTEND.
+
+15. THE SYSTEM MUST BE MOBILE-FIRST.
+
+16. AGENTS MUST COMMUNICATE THROUGH CONTROLLED WORKFLOW/STATE.
+
+17. AGENTS MUST NOT HAVE UNCONTROLLED DIRECT ACCESS TO EACH OTHER.
+
+18. STORY CONTINUITY MUST BE PERSISTENT.
+
+19. EVERY IMPORTANT AI ACTION MUST PRODUCE AN AUDITABLE EVENT.
+
+20. EVERY EXTERNAL INTEGRATION MUST HAVE A CLEAR FAILURE STATE.
+
+21. DO NOT BUILD FEATURES THAT ARE NOT REQUIRED FOR THE PRODUCTION PIPELINE.
+
+22. DO NOT REWRITE WORKING INFRASTRUCTURE WITHOUT A SPECIFIC REASON.
+
+23. DO NOT LOCK THE SYSTEM TO A SINGLE MODEL OR PROVIDER.
+
+24. HUMAN OVERRIDE MUST ALWAYS EXIST.
+
+25. THE ARCHITECTURE MUST SUPPORT FUTURE WORKERS WITHOUT REBUILDING THE CORE.
+
+
+---
+
+36. The most important architectural idea
+
+We're not really building a website that uploads YouTube videos.
+
+We're building a small AI production company in software.
+
+The website is the control room.
+
+OSTRA STUDIO
+                      │
+        ┌─────────────┴─────────────┐
+        │                           │
+   CONTROL PLANE              PRODUCTION PLANE
+        │                           │
+   Orchestrator              Script / Images
+   Database                   Voice
+   Scheduler                  Video
+   Agent Room                 Assets
+   Approvals
+        │                           │
+        └─────────────┬─────────────┘
+                      ↓
+                  YOUTUBE
+
+That distinction matters because it determines how we build everything else.
+
+Next, I would turn this blueprint into the actual repository specification: README, PROJECT_CONTEXT.md, ARCHITECTURE.md, CONSTRAINTS.md, database schema specification, agent contracts, API contracts, and a phased implementation task list. That gives a coding agent enough context to build the foundation without inventing architecture as it goes.
