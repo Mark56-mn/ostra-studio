@@ -1503,3 +1503,381 @@ The dashboard should show concise operational status and rationale, not hidden c
 7. Add Colab Image/Voice starter adapters only when a real trigger mechanism is verified.
 8. Add startup history and failure observability.
 9. Test duplicate protection, offline recovery, schedule changes, and manual Run Now.
+
+
+---
+
+38. CURRENT EXECUTION TASK — FINISH REAL EXTERNAL RUNTIME AUTO-START
+
+The existing repository already contains the runtime supervisor, Supabase migrations, scheduler, worker health logic, registration routes, and RuntimeStarter abstraction. Do NOT rebuild those systems. Inspect and extend them.
+
+### Exact Script AI notebook
+
+The user supplied this Kaggle notebook identifier:
+
+`notebook7eae283a4a`
+
+Resolve and verify its actual Kaggle owner/kernel reference using the authenticated Kaggle account/API. Do not invent an owner or slug. If this is an internal/legacy identifier, determine the real `owner/kernel-slug` reference from Kaggle.
+
+The final Render configuration must point to the exact verified notebook containing the user's Qwen Script AI.
+
+### Current known incomplete area
+
+`packages/shared/src/providers/runtimeStarters.ts` currently performs a Kaggle authentication/list check and then creates a synthetic provider run ID. It does NOT actually execute the notebook.
+
+This MUST be replaced.
+
+Implement:
+
+Render scheduler
+→ authenticated Kaggle API
+→ exact configured notebook/kernel
+→ REAL execution request
+→ real provider execution/run identifier
+→ Kaggle worker starts
+→ worker registration
+→ health check
+→ ONLINE
+
+Never fabricate a provider run ID or report a successful startup when only authentication succeeded.
+
+Use the current official Kaggle API/CLI behavior. Current Kaggle documentation exposes `kernels.execute` permission, and the current CLI supports notebook execution through the kernel workflow. Verify the exact current execution call/CLI mechanism before implementing it.
+
+### Kaggle configuration
+
+Use server-side configuration:
+
+`KAGGLE_API_TOKEN`
+`KAGGLE_KERNEL_REF`
+
+Use existing environment conventions where present.
+
+Never expose these values to the browser.
+
+### Kaggle lifecycle
+
+Keep these states separate:
+
+1. API authentication succeeded
+2. execution requested
+3. Kaggle kernel running
+4. Qwen loaded
+5. FastAPI started
+6. tunnel reachable
+7. Ostra registration received
+8. health check passed
+9. worker ONLINE
+
+Only step 9 permits ONLINE.
+
+### Script worker registration
+
+The running Kaggle Script AI must register with Ostra after its FastAPI/tunnel service is ready.
+
+Registration must include:
+
+- worker_id
+- worker_type
+- runtime
+- provider
+- model
+- endpoint
+- capabilities
+- metadata where useful
+
+The worker must send authenticated heartbeats.
+
+The endpoint must be updated every run because the tunnel URL can change.
+
+Never assume a permanent tunnel URL.
+
+### Supabase
+
+Use the existing Supabase connection already supplied to the backend.
+
+Supabase is the source of truth for:
+
+- schedules
+- workers
+- registration
+- heartbeat/health
+- startup attempts
+- startup leases
+- audit events
+- errors
+- endpoint changes
+
+Do not create a second database or duplicate schema.
+
+Verify the existing migrations are actually applied to the target Supabase project. If they are only present in Git, apply them using the repository's established migration mechanism.
+
+### Scheduler
+
+Use the existing scheduler as the control-plane owner.
+
+At every scheduled trigger:
+
+1. Load the persisted schedule.
+2. Check enabled state.
+3. Calculate local time using the schedule timezone.
+4. Find the worker.
+5. If healthy, record `scheduler.skipped_already_online`.
+6. Otherwise acquire the persisted startup lease.
+7. Request startup through RuntimeStarter.
+8. Persist the REAL startup/provider ID.
+9. Wait for worker registration.
+10. Validate health.
+11. Mark ONLINE only after registration + health validation.
+12. Release the lease on success or terminal failure.
+
+Render restarts must not lose startup state.
+
+### Duplicate protection
+
+Scheduled startup and Run Now must use the same persisted lease/idempotency mechanism.
+
+Never start duplicate runtimes because scheduler ticks overlap.
+
+Expired leases must recover safely.
+
+### Manual Run Now
+
+Run Now must use the same lifecycle as scheduled startup. It must not bypass health checks, leases, Supabase persistence, authentication, or failure handling.
+
+### Colab API — confirmed
+
+Google Colab DOES have an official programmatic API.
+
+The current Colab API is beta and allowlist-based.
+
+Official service:
+
+`https://colaboratory.googleapis.com`
+
+It supports:
+
+- list runtimes
+- create managed runtime
+- get runtime
+- delete runtime
+- list runtime specifications
+- long-running operation tracking
+
+Runtime creation:
+
+`POST https://colaboratory.googleapis.com/v1beta/runtimes`
+
+It requires the Colab OAuth scope:
+
+`https://www.googleapis.com/auth/colaboratory`
+
+Runtime creation returns a long-running Operation. Runtime objects expose connection information including a URL and short-lived proxy token.
+
+IMPORTANT: Creating a Colab runtime creates a managed Jupyter runtime; it does NOT by itself guarantee that a particular notebook has executed its cells.
+
+Therefore the lifecycle must be:
+
+Colab runtime requested
+→ runtime created
+→ runtime connection available
+→ worker bootstrap executed
+→ worker registered
+→ health check passed
+→ ONLINE
+
+Do not claim that a notebook is running merely because the Colab runtime exists.
+
+### Colab implementation
+
+Replace the current permanently-disabled Colab adapters with real API-backed adapters where access is available.
+
+Implement:
+
+`ColabImageRuntimeStarter`
+`ColabVoiceRuntimeStarter`
+
+using the official Colab API for runtime creation/management.
+
+Use configuration for:
+
+- Google Cloud project
+- OAuth authentication
+- runtime specification
+- accelerator
+- shape
+- runtime ID
+- worker bootstrap mechanism
+- worker registration endpoint
+
+Do not hard-code a GPU.
+
+Use/list eligible runtime specs when needed because runtime availability depends on the requesting account.
+
+If the project is not allowlisted, authentication is unavailable, or worker bootstrap cannot be performed reliably, return the truthful state (`NOT_AUTOSTARTABLE`, `AUTH_FAILED`, or another real failure) rather than fake success.
+
+### Colab worker bootstrap
+
+A runtime being created is not enough.
+
+Implement a replaceable bootstrap mechanism that starts the actual Image AI/Voice AI worker inside the runtime and causes it to register with Ostra.
+
+Do not treat a notebook URL as an API execution method.
+
+If the chosen bootstrap mechanism cannot yet be automated reliably, report WAITING/NOT_AUTOSTARTABLE and document the exact blocker.
+
+### Runtime abstraction
+
+Keep provider-specific logic inside:
+
+`KaggleRuntimeStarter`
+`ColabImageRuntimeStarter`
+`ColabVoiceRuntimeStarter`
+
+The scheduler must remain provider-neutral.
+
+No starter may claim ONLINE.
+
+### Dashboard
+
+The existing runtime UI must support:
+
+- worker status
+- runtime/provider/model
+- heartbeat age
+- endpoint state
+- schedule windows
+- timezone
+- enable/disable
+- add/remove/edit schedule
+- Run Now
+- Pause/Resume
+- next run
+- last run
+- startup history
+- actual failure reason
+
+Schedules must be persisted data, not source-code constants.
+
+Initial examples can remain 09:00, 14:00, 20:00 and Africa/Lagos, but must be editable.
+
+### Startup history
+
+Persist real values for:
+
+- startup_request_id
+- worker
+- schedule
+- runtime
+- provider
+- provider_run_id
+- requested_at
+- started_at
+- registered_at
+- completed_at
+- status
+- error_code
+- error_message
+- metadata
+
+Never store secrets in provider responses or metadata.
+
+### Tests
+
+Add/update tests for:
+
+Kaggle:
+- missing token
+- missing kernel ref
+- auth failure
+- real execution request construction
+- provider response parsing
+- provider failure
+- real provider run ID handling
+- no synthetic provider IDs
+
+Scheduler:
+- already online
+- duplicate startup
+- lease
+- expired lease
+- timezone
+- multiple windows
+- schedule change
+- Run Now
+- failure
+- timeout
+- recovery
+
+Worker:
+- authenticated registration
+- endpoint update
+- heartbeat
+- heartbeat timeout
+- OFFLINE transition
+
+Colab:
+- allowlist failure
+- auth failure
+- runtime creation
+- operation polling
+- runtime connection info
+- unsupported runtime spec
+- truthful NOT_AUTOSTARTABLE when bootstrap is unavailable
+
+Clearly distinguish unit tests from real external integration tests.
+
+### Real verification
+
+Where credentials/access permit, verify:
+
+Kaggle:
+Render → Kaggle API → exact `notebook7eae283a4a` / resolved kernel → notebook executes → Qwen starts → FastAPI/tunnel → registration → heartbeat → health → ONLINE.
+
+Colab:
+Render → Colab API → runtime created → operation completes → runtime connection → worker bootstrap → registration → heartbeat → health → ONLINE.
+
+If a provider blocks verification, record the exact blocked step. Never label it verified.
+
+### Documentation + handoff
+
+Update documentation only to match actual implementation:
+
+- `PROJECT_CONTEXT.md`
+- `ARCHITECTURE.md`
+- `AGENT_CONTRACTS.md`
+- `IMPLEMENTATION_PLAN.md`
+- `HANDOFF_PROTOCOL.md`
+
+Update:
+
+`handoffs/HANDOFF-2026-09-26-runtime-auto-start-implementation.md`
+
+The handoff must state what was implemented, tested, externally verified, blocked, and what remains.
+
+### Definition of Done
+
+A. Existing scheduler + Supabase persistence work.
+
+B. Kaggle starter performs a REAL notebook execution request, not an auth probe.
+
+C. `notebook7eae283a4a` resolves to a verified Kaggle kernel reference.
+
+D. Script AI registers dynamically.
+
+E. Heartbeats/health determine actual ONLINE/OFFLINE.
+
+F. Duplicate startup is prevented.
+
+G. Schedule changes persist and affect future runs.
+
+H. Run Now uses the same safe lifecycle.
+
+I. Colab uses the official API when access is available and remains truthful when allowlist/auth/bootstrap is unavailable.
+
+J. No mock runtime, synthetic provider success, fake ONLINE state, or hard-coded secret exists.
+
+K. Handoff is updated.
+
+L. Repository remains buildable/testable.
+
+Do not stop at interfaces. Implement the real vertical slice. Do not rewrite working architecture or build unrelated features.
