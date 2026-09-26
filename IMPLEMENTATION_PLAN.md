@@ -167,3 +167,38 @@ story → script → scenes → images → voice → FFmpeg video → storage �
 without mock data.
 
 YouTube upload can follow after the review gate is verified.
+
+
+## Phase 10A — External runtime auto-start supervisor
+
+Before broad production automation, implement a configurable runtime supervisor in the Render control plane.
+
+Scope:
+- configurable multiple daily startup times per worker
+- timezone-aware schedules
+- enable/disable schedule windows
+- manual Run Now
+- persisted next/last run metadata
+- duplicate-run protection
+- startup leases/timeouts
+- runtime registration and heartbeat
+- real health validation
+- startup history/events
+
+Initial workers:
+- Script AI / Kaggle
+- Image AI / Colab
+- Voice AI / Colab
+
+Important: Kaggle API execution is a real trigger mechanism, but the trigger itself does not prove that the model API is reachable. The worker must register and pass health checks before being considered ONLINE.
+
+Colab startup must remain adapter-based and must only be marked supported after a real trigger mechanism is verified. Do not create a fake Colab startup.
+
+Suggested initial UI schedule examples (editable, not hard-coded):
+- Morning 09:00
+- Afternoon 14:00
+- Evening 20:00
+
+The creator must be able to change 09:00 to 05:00, add/remove windows, enable/disable them, and set timezone without code changes.
+
+Free-tier quotas/session limits must surface as real provider failures or unavailable states.
