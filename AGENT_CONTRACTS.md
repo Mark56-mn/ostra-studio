@@ -130,3 +130,36 @@ The workflow must depend on capability contracts, not provider-specific behavior
 
 For example:
 `generate_voice()` is a capability; Kokoro and ElevenLabs are implementations.
+
+
+## Runtime starter contract
+
+A runtime starter is responsible only for requesting startup of a temporary external worker runtime.
+
+Input:
+- worker type
+- runtime/provider
+- schedule/manual trigger source
+- runtime configuration reference
+
+Output:
+- startup request id
+- provider request/result
+- provider run identifier where available
+- initial state
+
+It must not claim the worker is ONLINE. Online state is established by worker registration + health validation.
+
+Runtime starters must be replaceable. The initial implementation is:
+- Kaggle starter → Kaggle kernel execution
+- Colab starters → only after a real trigger mechanism is verified
+
+### Scheduler contract
+
+The scheduler accepts persisted, timezone-aware schedule windows and emits startup requests. It must:
+- avoid duplicate starts
+- respect enabled/disabled state
+- respect cooldown/lease
+- record events
+- expose next/last run
+- preserve queued tasks when a worker cannot start
