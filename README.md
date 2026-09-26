@@ -24,7 +24,11 @@ User story/idea
 - Voice AI: Kokoro-82M initially, with provider adapters for future alternatives
 - Video: FFmpeg-based deterministic renderer
 - Database/storage: Supabase candidate
-- Frontend: mobile-first web application
+- Frontend/dashboard: Vercel
+- Backend API + Orchestrator: Render
+- Database: Supabase Postgres
+- Production file storage: Supabase Storage
+- Heavy video rendering: separate worker/runtime when practical
 - YouTube: official API integration after the production pipeline is stable
 
 ## Critical rules
