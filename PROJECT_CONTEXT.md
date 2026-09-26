@@ -151,3 +151,14 @@ Do not build fake agents just to make screens look complete.
 If a service is unavailable, show its actual state: OFFLINE, WAITING, FAILED, etc.
 
 Preserve working infrastructure and avoid unnecessary rewrites.
+
+
+## 9. External runtime scheduling
+
+Ostra may automatically start temporary AI runtimes so the creator does not need to manually start every notebook/session.
+
+Initial targets are Script AI on Kaggle and Image/Voice AI on Colab. The Render backend controls schedules; Vercel is only the control UI.
+
+Schedules are configurable data. The creator can configure morning, afternoon, and evening windows, change a time such as 09:00 to 05:00, add/remove windows, enable/disable them, and set the timezone.
+
+A scheduled trigger is not an ONLINE signal. A worker must register and pass health validation before Ostra reports it as ONLINE.
