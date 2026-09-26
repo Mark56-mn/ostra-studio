@@ -1,5 +1,18 @@
 # Ostra Studio — Implementation Plan
 
+## Deployment topology (non-negotiable initial direction)
+
+- Ostra Studio website/dashboard: **Vercel**.
+- Backend API + Orchestrator: **Render**.
+- Database: **Supabase Postgres**.
+- Large production files: **Supabase Storage**.
+- Script AI: Kaggle initially.
+- Image AI: Google Colab initially.
+- Voice AI: Google Colab initially.
+- Heavy video rendering: a worker/runtime separate from the Render control API when practical; do not assume Render Free is suitable for long FFmpeg jobs.
+
+The frontend must communicate with the backend through a documented API. Do not merge frontend and backend into a single Render deployment merely for convenience. Keep deployment boundaries replaceable.
+
 ## Phase 0 — Repository foundation
 
 Create the application foundation and documentation structure.
