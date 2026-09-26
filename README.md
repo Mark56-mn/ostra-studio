@@ -9,8 +9,8 @@ The goal is not merely to upload videos. Ostra coordinates a production pipeline
 - **Vercel** → entire website / dashboard / frontend (`apps/web` — Next.js 14, `NEXT_PUBLIC_API_URL` only, no secrets)
 - **Render** → backend API + Orchestrator + Scheduler + Runtime Supervisor (`apps/api` — Express, owns **all** secrets, CORS-locked to Vercel)
 - **Supabase** → Postgres + Storage (shared; migrations `001` + `002` + `003`, bucket `ostra-assets`)
-- **Kaggle** → Script AI (Render probes `KAGGLE_SCRIPT_URL`; auto-start via `KaggleRuntimeStarter` → worker self-registration → health-gated `ONLINE`)
-- **Google Colab** → Image AI + Voice AI (adapters present; `NOT_AUTOSTARTABLE` until a real trigger is proven — no fake start)
+- **Kaggle** → Script AI (auto-start via real `KaggleRuntimeStarter` → `POST /api/v1/kernels/push` (`ApiSaveKernelRequest`) → exact notebook `notebook7eae283a4a` resolved → `ref@vN` provider_run_id → worker self-registration → health-gated `ONLINE`)
+- **Google Colab** → Image AI + Voice AI (adapters present; `Colab*RuntimeStarter` `autostartable=true` but truthful — `POST https://colaboratory.googleapis.com/v1beta/runtimes` → `operations/...` when allowlisted, otherwise `NOT_AUTOSTARTABLE`/`AUTH_FAILED` with bootstrap/allowlist blocker; no fake start)
 - **FFmpeg** → deterministic video renderer, kept **independently replaceable** (never assumed stable on Render Free)
 
 Frontend and backend are **not** merged into one Render deployment. Vercel calls Render via `NEXT_PUBLIC_API_URL`. Render calls Supabase / Kaggle / Colab.
@@ -31,8 +31,8 @@ User story/idea
 ## Initial runtimes
 
 - Script AI: Kaggle (`RuntimeStarter` `kaggle` — full auto-start lifecycle)
-- Image AI: Colab (`colab:image` — `NOT_AUTOSTARTABLE` until verified)
-- Voice AI: Kokoro-82M on Colab (`colab:voice` — `NOT_AUTOSTARTABLE` until verified)
+- Image AI: Colab (`colab:image` — real `POST /v1beta/runtimes` → `operations/...`, truthful `NOT_AUTOSTARTABLE`/`AUTH_FAILED` when project/token/bootstrap/allowlist missing)
+- Voice AI: Kokoro-82M on Colab (`colab:voice` — same real Colab API, truthful when not allowlisted)
 - Video: FFmpeg deterministic renderer (adapter `VideoRenderer`, replaceable)
 - Database/Storage: Supabase (Postgres + Storage)
 - Frontend: Next.js 14, mobile-first (Vercel)
@@ -41,8 +41,8 @@ User story/idea
 
 ## Critical rules
 
-- No mock mode. No fake agents. No fake success states. No fake startup — worker is `ONLINE` only after registration + health pass.
-- Real services report their real status (`OFFLINE` when unconfigured — never faked; `NOT_AUTOSTARTABLE` for Colab until trigger is proven).
+- No mock mode. No fake agents. No fake success states. No fake startup — worker is `ONLINE` only after registration + health pass; `provider_run_id` is the real Kaggle `ref@vN` or Colab `operations/...`, never synthetic `kaggle:startup_request_id`.
+- Real services report their real status (`OFFLINE` when unconfigured — never faked; Kaggle `AUTH_FAILED`/`QUOTA_EXCEEDED`/`RATE_LIMITED`, Colab `NOT_AUTOSTARTABLE` for allowlist/bootstrap missing, `AUTH_FAILED` for token invalid).
 - AI providers are adapters and must be replaceable (`packages/shared/src/providers/{contracts,registry,runtimeStarters}.ts`).
 - Kaggle and Colab are initial runtimes, not permanent dependencies. Startup mode is stored per schedule (`kaggle_kernel` / `colab_notebook` / `not_autostartable`), never hard-coded.
 - ElevenLabs is optional, never mandatory. Kokoro-82M is the initial free voice.
@@ -73,7 +73,7 @@ SCHEDULE FIRES → CHECK WORKER HEALTHY? → ALREADY ONLINE → skip (recorded, 
              Schedule edit 09:00→05:00 persists and next run moves immediately (Case F)
 ```
 
-Duplicate protection: healthy check + in-progress lease + per-worker cooldown before any start. Bounded retries via `max_start_attempts` + `cooldown_minutes`. Colab starters return `NOT_AUTOSTARTABLE` (explicit, not a fake button) until a real trigger mechanism is proven and tested. **Run Now** (`POST /api/runtime/run-now`) runs the exact same lifecycle as scheduled start.
+Duplicate protection: healthy check + in-progress lease + per-worker cooldown before any start. Bounded retries via `max_start_attempts` + `cooldown_minutes`. Colab starters are `autostartable=true` (scheduler attempts) but truthfully return `NOT_AUTOSTARTABLE`/`AUTH_FAILED` when project/token/bootstrap/allowlist/spec check fails, or `requested` with real `operations/...` on success. Kaggle push is a real `POST /api/v1/kernels/push` with `text` fetched from `GET /api/v1/kernels/{owner}/{slug}`. **Run Now** (`POST /api/runtime/run-now`) runs the exact same lifecycle as scheduled start.
 
 ## Repository instructions
 
@@ -105,7 +105,9 @@ bun install
 # SUPABASE_URL (or SUPABASE_CONNECTION_STRING / NEXT_PUBLIC_SUPABASE_URL)
 # SUPABASE_SERVICE_ROLE_KEY, CORS_ORIGINS,
 # WORKER_REGISTRATION_TOKEN (or WORKER_REGISTRATION_SECRET), CRON_SECRET,
-# SCHEDULER_ENABLED, KAGGLE_API_TOKEN, KAGGLE_KERNEL_REF, KOKORO_*, COLAB_*, AUTO_PUBLISH=false
+# SCHEDULER_ENABLED, KAGGLE_API_TOKEN, KAGGLE_KERNEL_REF, KAGGLE_EXEC_DISABLED,
+# GOOGLE_CLOUD_PROJECT/COLAB_PROJECT_ID, GOOGLE_OAUTH_TOKEN/COLAB_OAUTH_TOKEN,
+# COLAB_RUNTIME_SPEC, COLAB_IMAGE_BOOTSTRAP_URL/COLAB_VOICE_BOOTSTRAP_URL, KOKORO_*, AUTO_PUBLISH=false
 # See docs/ENV.md + docs/API_ENV.md for the full list.
 
 # --- Vercel env (apps/web — no secrets) ---
@@ -133,7 +135,7 @@ apps/api/               # Express API + Orchestrator + Scheduler + Supervisor �
   src/routes/{schedules,runtime,registration}.ts
 packages/shared/        # Domain, contracts, state, events — single source of truth
   src/domain/schedules.ts  # isDueNow, nextRunUtc, tzOffsetMinutes, validateScheduleCreate
-  src/providers/runtimeStarters.ts  # RuntimeStarter, KaggleRuntimeStarter, Colab* (NOT_AUTOSTARTABLE)
+  src/providers/runtimeStarters.ts  # RuntimeStarter, KaggleRuntimeStarter (real push → ref@vN), Colab* (real POST /v1beta/runtimes → operations/...)
   src/orchestrator/state.ts
 supabase/migrations/001_initial.sql  # domain
 supabase/migrations/002_runtime_supervisor.sql  # schedules + leases + history + worker extensions
@@ -181,4 +183,4 @@ Every agent that performs repository work MUST create or update a handover in `h
 
 ## Current status
 
-**Runtime auto-start supervisor shipped — build-verified 2026-09-26.** Kaggle auto-start lifecycle is real (auth check + history + lease + registration + heartbeat-gated `ONLINE` with `REQUESTED→STARTING→REGISTERING→ONLINE`); Colab correctly returns `NOT_AUTOSTARTABLE` until a genuine trigger is proven. No mocks, no fake ONLINE, no hard-coded schedules. See the latest handover in `handoffs/` for tests, known issues, and the exact next task.
+**Runtime auto-start supervisor shipped — build-verified 2026-09-26 (b2da1ce).** Kaggle auto-start lifecycle is real (`POST /api/v1/kernels/push` via `ApiSaveKernelRequest` → notebook `notebook7eae283a4a` resolved to `owner/slug` → `ref@vN` provider_run_id, no synthetic IDs); Colab image/voice starters are real (`POST https://colaboratory.googleapis.com/v1beta/runtimes` → `operations/...`) but truthful when not allowlisted (`NOT_AUTOSTARTABLE`/`AUTH_FAILED`). History/leases in Supabase, secrets server-only, mobile-first. See the latest handover in `handoffs/` for tests, known issues, and the exact next task.

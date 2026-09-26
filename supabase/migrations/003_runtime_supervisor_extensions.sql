@@ -27,11 +27,15 @@ alter table runtime_startup_history add column if not exists error_code text;
 alter table runtime_startup_history add column if not exists error_message text;
 alter table runtime_startup_history add column if not exists metadata jsonb;
 
--- Indexes for new columns
+-- Indexes for new columns (startup_request_id is a correlation id shared across lifecycle rows — NOT unique)
 create index if not exists idx_runtime_startup_history_worker_id on runtime_startup_history(worker_id);
 create index if not exists idx_runtime_startup_history_startup_request_id on runtime_startup_history(startup_request_id);
 create index if not exists idx_runtime_startup_history_status on runtime_startup_history(status);
 create index if not exists idx_runtime_startup_history_started_at on runtime_startup_history(started_at);
+
+-- Clean up the overly-strict unique index that was deployed in an early version of this migration
+-- It blocked REQUESTED->STARTING rows sharing the same startup_request_id as correlation.
+drop index if exists idx_runtime_startup_history_startup_req_unique;
 
 -- Expand checks — drop and re-add with spec states (idempotent)
 do $$
@@ -63,9 +67,6 @@ alter table runtime_startup_history add constraint runtime_startup_history_statu
     'pending','requested','starting','registering','online','failed','timed_out','registered','health_passed',
     'skipped_already_online','skipped_in_progress','skipped_cooldown','not_autostartable'
   ));
-
--- Ensure startup_request_id is usable as correlation id (indexed, unique where present)
-create unique index if not exists idx_runtime_startup_history_startup_req_unique on runtime_startup_history(startup_request_id) where startup_request_id is not null;
 
 -- ── runtime_schedules: no change (already complete in 002) ──────────────
 -- 002 already has: id (schedule_id), worker_type, runtime, provider, enabled, local_time, timezone, days_of_week, startup_mode, max_start_attempts, cooldown_minutes, created_at, updated_at

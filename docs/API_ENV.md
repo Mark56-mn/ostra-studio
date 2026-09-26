@@ -24,11 +24,23 @@ WORKER_REGISTRATION_TOKEN=...            # alias: WORKER_REGISTRATION_SECRET —
 WORKER_REGISTRATION_SECRET=...           # alias for WORKER_REGISTRATION_TOKEN (either works)
 WORKER_HEARTBEAT_TIMEOUT_SEC=90
 
-# Worker adapters — absence = OFFLINE (truth, not error)
+# Kaggle Script AI — real execution via POST /api/v1/kernels/push (ApiSaveKernelRequest)
 KAGGLE_SCRIPT_URL=https://...
-KAGGLE_API_TOKEN=...            # server-only, redacted in logs
-KAGGLE_KERNEL_REF=...           # e.g. mark56/studio-script-kernel (exact notebook)
-KAGGLE_EXEC_DISABLED=false
+KAGGLE_API_TOKEN=...            # server-only, JSON {username,key} or username:key or KGAT_* Bearer, redacted
+KAGGLE_KERNEL_REF=...           # e.g. mark56/studio-script-kernel or legacy notebook7eae283a4a (resolved to owner/slug)
+KAGGLE_EXEC_DISABLED=false      # true => probe-only, no push
+
+# Colab Image / Voice — real auto-start via POST https://colaboratory.googleapis.com/v1beta/runtimes
+# When unset, starters truthfully return NOT_AUTOSTARTABLE/AUTH_FAILED — no fake start.
+# provider_run_id is the real Operation name (operations/...); runtime creation != ONLINE until worker registers.
+GOOGLE_CLOUD_PROJECT=...         # alias: COLAB_PROJECT_ID / GCP_PROJECT_ID / GOOGLE_PROJECT_ID — allowlisted GCP project
+GOOGLE_OAUTH_TOKEN=...           # alias: COLAB_OAUTH_TOKEN / COLAB_ACCESS_TOKEN / GOOGLE_ACCESS_TOKEN — Bearer for scope https://www.googleapis.com/auth/colaboratory
+COLAB_IMAGE_BOOTSTRAP_URL=...    # alias: COLAB_BOOTSTRAP_URL — mechanism that starts Image worker and makes it POST /api/workers/register
+COLAB_VOICE_BOOTSTRAP_URL=...    # alias: COLAB_BOOTSTRAP_URL — same for Voice worker
+COLAB_RUNTIME_SPEC=...           # optional spec id (validated via GET /v1beta/runtimespecs eligible)
+COLAB_RUNTIME_ID=...             # optional runtimeId for POST ?runtimeId=…
+
+# Legacy health probes (probe-only, no auto-start)
 COLAB_IMAGE_URL=https://...
 COLAB_VOICE_URL=https://...
 KOKORO_VOICE_URL=https://...
@@ -42,6 +54,14 @@ YOUTUBE_REDIRECT_URI=
 AUTO_PUBLISH=false
 PORT=3001
 ```
+
+### Kaggle auto-start (real, not probe-only) — `KaggleRuntimeStarter`
+
+`POST /api/v1/kernels/push` via `ApiSaveKernelRequest{ slug, newTitle, text, language, kernelType, isPrivate, enableInternet, enableGpu/Tpu, … }` → `ApiSaveKernelResponse{ versionNumber, url, ref }` → `provider_run_id = ref@vN`. `notebook7eae283a4a` resolved by `resolveKaggleKernelRef()` via `GET /api/v1/kernels/list?mine=true&search=`.
+
+### Colab auto-start (real API, truthful when not allowlisted) — `ColabImageRuntimeStarter` / `ColabVoiceRuntimeStarter`
+
+Both `autostartable=true` so the scheduler can attempt; missing `GOOGLE_CLOUD_PROJECT`→`NOT_AUTOSTARTABLE`, missing `GOOGLE_OAUTH_TOKEN`→`AUTH_FAILED`, missing bootstrap→`NOT_AUTOSTARTABLE` (notebook URL is not an execution method), spec `eligible=false`→`NOT_AUTOSTARTABLE`, `GET /v1beta/runtimespecs` allowlist check. On success, `POST /v1beta/runtimes` → `Operation{ name: operations/... }` → real `provider_run_id`.
 
 Supabase migrations (run once, idempotent, in order):
 - `supabase/migrations/001_initial.sql`
