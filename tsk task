@@ -1344,3 +1344,162 @@ OSTRA STUDIO
 That distinction matters because it determines how we build everything else.
 
 Next, I would turn this blueprint into the actual repository specification: README, PROJECT_CONTEXT.md, ARCHITECTURE.md, CONSTRAINTS.md, database schema specification, agent contracts, API contracts, and a phased implementation task list. That gives a coding agent enough context to build the foundation without inventing architecture as it goes.
+
+---
+
+37. External Runtime Auto-Start Scheduler
+
+Ostra Studio must support automatic startup of temporary external AI runtimes so the production workers do not depend on manual notebook startup.
+
+Initial targets:
+- Script AI → Kaggle Notebook
+- Image AI → Google Colab runtime
+- Voice AI → Google Colab runtime
+
+The scheduler belongs to the Render control plane, not the Vercel frontend.
+
+### Runtime startup model
+
+The scheduler must treat each external runtime as a replaceable worker with a lifecycle:
+
+SCHEDULED
+→ START_REQUESTED
+→ STARTING
+→ REGISTERING
+→ ONLINE
+→ IDLE/WORKING
+→ OFFLINE
+
+A successful API trigger only means that a runtime start was requested. It must NOT be reported as ONLINE until the worker actually registers with Ostra and passes a health check.
+
+### Configurable schedules
+
+The creator must be able to configure multiple daily startup windows for each worker independently.
+
+Example default schedule:
+- Morning: 09:00
+- Afternoon: 14:00
+- Evening: 20:00
+
+These are examples, not hard-coded times. The dashboard must allow the creator to change them, for example:
+- 09:00 → 05:00
+- add/remove a run window
+- enable/disable a window
+- change timezone
+- configure different schedules per worker
+
+The scheduler must store schedules as data, not source-code constants.
+
+Suggested schedule model:
+- schedule_id
+- worker_type
+- runtime/provider
+- enabled
+- local_time
+- timezone
+- days_of_week
+- startup_mode
+- max_start_attempts
+- cooldown_minutes
+- created_at
+- updated_at
+
+### Startup decision
+
+At every scheduled trigger the Render backend should:
+1. Check current worker registration/health.
+2. If the worker is already healthy, do not start a duplicate runtime.
+3. If offline and the schedule is enabled, request runtime startup.
+4. Record a scheduler event.
+5. Wait for worker registration/heartbeat.
+6. Mark ONLINE only after successful registration + health validation.
+7. If startup fails, mark the worker FAILED/OFFLINE with a real error and leave queued work intact.
+
+### Kaggle Script AI
+
+Use the Kaggle API/CLI capability to execute the configured notebook/kernel. Kaggle's current public API supports notebook/kernel execution and exposes kernel status; the `kernels.execute` permission exists for API authentication. The implementation must verify the exact API call/CLI flow against the current Kaggle API before claiming it works.
+
+Required server-side configuration:
+- KAGGLE_API_TOKEN
+- KAGGLE_KERNEL_REF (or equivalent owner/kernel identifier)
+- optional accelerator/runtime settings where supported
+
+Never expose these secrets to Vercel/client code.
+
+Important distinction:
+- triggering Kaggle execution ≠ worker online
+- Kaggle kernel running ≠ FastAPI/tunnel endpoint reachable
+- endpoint reachable ≠ worker healthy
+
+The Kaggle notebook must register itself with Ostra after its service is ready and send heartbeats while alive.
+
+If the endpoint/tunnel URL changes between runs, the worker registration must update the endpoint dynamically; Ostra must never assume a permanent tunnel URL.
+
+### Colab Image/Voice runtimes
+
+The same worker lifecycle must be used for Colab-backed Image AI and Voice AI. The scheduler must call a runtime-specific startup mechanism through an adapter rather than hard-code Colab behavior into the orchestrator.
+
+If a reliable external trigger is not available for a Colab runtime, the scheduler must report the worker as NOT_AUTOSTARTABLE/WAITING rather than pretending it started. Keep the runtime adapter replaceable.
+
+### Duplicate-run protection
+
+The scheduler must be idempotent. It must prevent overlapping startup attempts for the same worker/runtime and avoid launching duplicate notebooks when a healthy worker is already registered.
+
+Use a startup lease/lock or equivalent persisted state with an expiry.
+
+### Quotas and resource awareness
+
+External free runtimes may impose session, compute, scheduling, or accelerator limits. The scheduler must not promise unlimited availability. Capture provider errors and quota exhaustion as real events/states.
+
+### Manual control
+
+The dashboard must provide:
+- Run now
+- Pause schedule
+- Resume schedule
+- Edit schedule
+- View next run
+- View last run
+- View startup history
+- View current worker health
+
+Manual Run Now must use the same startup lifecycle and duplicate protection as scheduled runs.
+
+### Observability
+
+Create auditable events for:
+- scheduler.triggered
+- scheduler.skipped_already_online
+- scheduler.start_requested
+- scheduler.start_failed
+- worker.registration_received
+- worker.health_check_passed
+- worker.health_check_failed
+- worker.heartbeat_received
+- worker.timeout
+- worker.offline
+
+The dashboard should show concise operational status and rationale, not hidden chain-of-thought.
+
+### Safety/production rules
+
+- No fake ONLINE state.
+- No fake successful startup.
+- No mock runtime.
+- No secret in frontend.
+- No destructive action when a runtime is unavailable.
+- Queued production tasks remain queued until a compatible worker is available.
+- Scheduler must be disabled safely without deleting worker/task history.
+- Auto-start does not imply auto-publish.
+
+### Implementation order
+
+1. Add persisted worker schedule/config model.
+2. Add scheduler service in Render backend.
+3. Add generic RuntimeStarter adapter interface.
+4. Implement and verify Kaggle starter first.
+5. Implement Script AI self-registration + heartbeat.
+6. Add dashboard schedule editor and runtime controls.
+7. Add Colab Image/Voice starter adapters only when a real trigger mechanism is verified.
+8. Add startup history and failure observability.
+9. Test duplicate protection, offline recovery, schedule changes, and manual Run Now.
