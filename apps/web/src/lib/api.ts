@@ -1,0 +1,38 @@
+// apps/web — API client
+// In production Vercel, set NEXT_PUBLIC_API_URL to the Render API URL (e.g. https://ostra-api.onrender.com).
+// In local dev without Render, fallback to "" which means same-origin Next API — we keep a tiny
+// local /api/health shim for offline development, but real deployments must talk to Render.
+
+export function apiBase(): string {
+  const raw = process.env.NEXT_PUBLIC_API_URL?.trim() ?? "";
+  if (!raw) return "";
+  return raw.replace(/\/$/, "");
+}
+
+export function apiUrl(path: string): string {
+  const base = apiBase();
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return base ? `${base}${p}` : p;
+}
+
+export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(apiUrl(path), {
+    ...init,
+    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    cache: "no-store",
+  });
+}
+
+// Helper to surface 503 hints (Supabase not configured on Render) to the UI
+export async function parseApiJson<T>(res: Response): Promise<T & { _error?: string; _hint?: string }> {
+  const text = await res.text();
+  try {
+    const j = JSON.parse(text) as T & { error?: string; hint?: string };
+    if (!res.ok && (j as { error?: string }).error) {
+      return { ...(j as object), _error: (j as { error?: string }).error, _hint: (j as { hint?: string }).hint } as T & { _error?: string; _hint?: string };
+    }
+    return j as T & { _error?: string; _hint?: string };
+  } catch {
+    return { _error: `Bad JSON (${res.status}): ${text.slice(0, 400)}` } as T & { _error?: string };
+  }
+}

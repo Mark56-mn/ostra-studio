@@ -1,0 +1,35 @@
+# dependencies
+node_modules
+.pnp
+.pnp.js
+
+# next / build
+.next
+out
+build
+dist
+apps/*/.next
+apps/*/.turbo
+
+# env (never commit secrets)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+apps/*/.env
+apps/*/.env.local
+
+# logs / coverage / caches
+logs
+*.log
+coverage
+*.tsbuildinfo
+.eslintcache
+.cache
+.turbo
+
+# os / ide
+.DS_Store
+.idea
+*.tgz

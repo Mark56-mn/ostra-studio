@@ -28,6 +28,8 @@ Required:
 
 No mock agents.
 
+**Status: shipped** — `supabase/migrations/001_initial.sql`, `packages/shared` domain/contracts, `docs/ENV.md`, `handoffs/`.
+
 ## Phase 1 — Domain foundation
 
 Implement:
@@ -42,6 +44,8 @@ Implement:
 - events
 - approvals
 
+**Status: shipped** — domain schemas, projects/episodes/scenes/artifacts/tasks/events/approvals routes on Render, Supabase schema.
+
 ## Phase 2 — Orchestrator
 
 Implement real:
@@ -53,6 +57,8 @@ Implement real:
 - artifact tracking
 - event logging
 - controlled agent messaging
+
+**Status: shipped (Phase 2 spine + Runtime Supervisor extension)** — `apps/api/src/routes/registration.ts` (upsert on `(type,runtime,provider)`, dynamic endpoint, heartbeat auth, `sweepStaleWorkers`), `apps/api/src/lib/workerHealth.ts`, `packages/shared/src/orchestrator/state.ts`, events audit.
 
 ## Phase 3 — Dashboard
 
@@ -68,6 +74,8 @@ Implement:
 
 Must be mobile-first.
 
+**Status: shipped** — `apps/web` (`/`, `/projects`, `/projects/[id]`, `/episodes/[id]`, `/agents`, `/activity`, `/runtimes`), `AgentRoom`, mobile-first tailwind, `apiUrl()` wiring to Render.
+
 ## Phase 4 — Script AI adapter
 
 Connect the existing real Kaggle Script AI.
@@ -82,6 +90,8 @@ Required:
 
 Do not fake results when Kaggle is unavailable.
 
+**Status: adapter shipped, live verification pending** — `KaggleRuntimeStarter` (real Kaggle API `GET /api/v1/kernels/list?mine=true` auth check, `KAGGLE_API_TOKEN` + `KAGGLE_KERNEL_REF` server-only, redacted responses, `KAGGLE_EXEC_DISABLED` probe mode, never ONLINE from request alone) in `packages/shared/src/providers/runtimeStarters.ts`. Health comes from `POST /api/workers/register` + `POST /api/workers/heartbeat` (authenticated). Needs a real Render+Supabase+Kaggle deployment to exercise the full `Render→Kaggle→Notebook→Qwen→FastAPI+tunnel→register→health→ONLINE` loop; see the latest handover's §10 for the exact steps.
+
 ## Phase 5 — Image AI adapter
 
 Connect the actual Colab image model.
@@ -93,6 +103,8 @@ Required:
 - artifact return
 - image versioning
 - failure/retry behavior
+
+**Status: interface shipped, auto-start blocked until verified** — `ColabImageRuntimeStarter` returns `NOT_AUTOSTARTABLE`; scheduler correctly skips with `not_autostartable` / `CANCELLED` instead of faking a start. Manual registration + heartbeat still work; a real Colab trigger must be researched/proven before promoting the starter.
 
 ## Phase 6 — Voice adapter
 
@@ -108,6 +120,8 @@ Future adapters:
 
 Voice must support scene/segment-level regeneration.
 
+**Status: same as Phase 5** — `ColabVoiceRuntimeStarter` (`kokoro-82m`) is explicit `NOT_AUTOSTARTABLE`; contract supports `kokoro-82m` on `colab` and future providers without rewriting the scheduler.
+
 ## Phase 7 — Video rendering
 
 Implement real FFmpeg rendering:
@@ -118,6 +132,8 @@ Implement real FFmpeg rendering:
 - music/SFX hooks
 - output validation
 - resumable/retryable rendering where practical
+
+**Status: not started** — `VideoRenderer` contract exists; FFmpeg is marked independently replaceable (never assumed stable on Render Free).
 
 ## Phase 8 — Human review
 
@@ -130,6 +146,8 @@ Implement:
 - regenerate selected assets
 - revision tracking
 
+**Status: spine exists** — `/episodes/[id]` + approvals route + `AUTO_PUBLISH=false` gate; deep review UI pending.
+
 ## Phase 9 — YouTube
 
 Implement real YouTube authentication/upload.
@@ -140,6 +158,8 @@ Rules:
 - video id persisted
 - failures recoverable
 - no secret in frontend
+
+**Status: not started** — YouTube provider is an offline stub; OAuth env vars documented.
 
 ## Phase 10 — Scheduler and automation
 
@@ -154,9 +174,13 @@ Later:
 - notifications
 - automated preparation
 
+**Status: first production slice shipped (2026-09-26) — Runtime Auto-Start Supervisor.** The spec's 29-part vertical slice is implemented on Render: persisted `runtime_schedules` (`local_time` + IANA `timezone` + `days_of_week` + `startup_mode` + `max_start_attempts` + `cooldown_minutes`), persisted `runtime_startup_leases` (survives restart), audited `runtime_startup_history` (lifecycle `REQUESTED→STARTING→REGISTERING→ONLINE / FAILED / TIMEOUT / CANCELLED`, `startup_request_id`, `error_code`, `started_at`/`registered_at`), `RuntimeStarter` abstraction (`KaggleRuntimeStarter` real, Colab `NOT_AUTOSTARTABLE`), authenticated registration + heartbeat with dynamic tunnel endpoint, mobile-first `/runtimes` dashboard (editable schedules, `days_of_week`, next-run hint, Run Now sharing the same lease lifecycle), and six auditable failure cases. Verify the live `Render→Kaggle→Notebook→register→heartbeat→ONLINE` loop from a real deployment before expanding to Image/Voice auto-start (Phases 5/6) and weekly cadence automation.
+
 ## Phase 11 — Analytics
 
 Add YouTube metrics and creator-facing reporting.
+
+**Status: not started.**
 
 ## Definition of done for the first production milestone
 

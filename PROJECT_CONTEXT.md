@@ -26,6 +26,8 @@ Responsibilities:
 
 The existing Kaggle model/service is the first real Script AI integration. Do not replace it with a fake implementation.
 
+**Runtime auto-start:** Script AI is auto-started on Render via `KaggleRuntimeStarter` → real Kaggle API (`KAGGLE_API_TOKEN` + `KAGGLE_KERNEL_REF`, server-only, redacted) → notebook kernel → Qwen → FastAPI + tunnel → authenticated `POST /api/workers/register` (worker_id `script-ai-kaggle`-style, dynamic endpoint per session) → heartbeat `POST /api/workers/heartbeat` → health-gated `ONLINE`. No fake success: a Kaggle API `requested` never implies `ONLINE`; only heartbeat does. See `supabase/migrations/002` + `003` and `packages/shared/src/providers/runtimeStarters.ts`.
+
 ### Image AI
 Initial runtime: Google Colab.
 
@@ -38,6 +40,8 @@ Responsibilities:
 
 It receives structured scene specifications and relevant references.
 
+**Auto-start status:** `NOT_AUTOSTARTABLE` until a reliable external trigger for Colab is researched and verified. The adapter interface (`ColabImageRuntimeStarter`) exists but explicitly returns `NOT_AUTOSTARTABLE`; the Render scheduler records `not_autostartable` / `CANCELLED` and emits `scheduler.skipped_not_autostartable` instead of faking a start. Manual registration + heartbeat still works.
+
 ### Voice AI
 Initial provider: Kokoro-82M, initially expected to run in Colab.
 
@@ -47,6 +51,8 @@ Responsibilities:
 - scene audio
 
 Voice is provider-independent. Future adapters may include Piper, ElevenLabs, or other providers.
+
+**Auto-start status:** Same as Image AI — `ColabVoiceRuntimeStarter` is `NOT_AUTOSTARTABLE` until proven; architecture supports future providers without rewriting the scheduler.
 
 ### Video engine
 Initial technology: FFmpeg.
@@ -70,6 +76,8 @@ The orchestrator owns:
 - approval gates
 
 Agents must not become uncontrolled peers that directly manage each other.
+
+**Runtime Supervisor (shipped — Phase 10 slice):** Render hosts the scheduler (`apps/api/src/lib/scheduler.ts` + `lease.ts` + `workerHealth.ts`, tick every 60s + `POST /api/runtime/tick` for Cron), persisted schedules (`runtime_schedules` — `local_time HH:MM` + IANA `timezone` + `days_of_week` + `startup_mode` + `max_start_attempts` + `cooldown_minutes`, editable from `/runtimes`), a persisted startup lease (`runtime_startup_leases` — one active per `(worker_type,runtime)`, survives Render restart), and audited startup history (`runtime_startup_history` — `startup_request_id`, `worker_id`, `started_at/registered_at/completed_at`, `status REQUESTED→STARTING→REGISTERING→ONLINE/FAILED/TIMEOUT/CANCELLED`, `error_code`). Duplicate protection: healthy check + lease + cooldown; bounded retries; `Run Now` shares the exact same lifecycle. Dashboard `/runtimes` exposes operational events (`scheduler.*`, `worker.*`).
 
 ## 4. Shared context
 
@@ -104,6 +112,8 @@ The UI should expose operational events, decisions, task inputs/outputs, tool ca
 
 Do not expose hidden chain-of-thought verbatim. Show concise operational rationale instead.
 
+`/runtimes` shows auditable startup history (lifecycle + `error_code`) and the `scheduler.*` / `worker.*` event taxonomy; `/activity` shows the full immutable `events` stream. Secrets are never logged or displayed.
+
 ## 6. Human control
 
 Default:
@@ -122,15 +132,16 @@ No video is automatically published unless the creator explicitly enables that b
 Keep the control plane lightweight. Heavy model inference should stay in external runtimes when practical.
 
 Initial direction:
-- frontend: Vercel-compatible
-- database: Supabase Postgres
+- frontend: Vercel-compatible (`apps/web` — only `NEXT_PUBLIC_API_URL`, no secrets)
+- API + Orchestrator + Scheduler: Render (`apps/api` — owns all secrets, CORS-locked to Vercel)
+- database: Supabase Postgres (`supabase/migrations/001` + `002` + `003`)
 - storage: Supabase Storage
-- Script AI: Kaggle
-- Image/Voice: Colab
+- Script AI: Kaggle (auto-started via `KaggleRuntimeStarter`)
+- Image/Voice: Colab (adapters present, `NOT_AUTOSTARTABLE` until verified)
 - renderer: FFmpeg worker
 - YouTube: official API
 
-These are replaceable implementation choices, not permanent dependencies.
+These are replaceable implementation choices, not permanent dependencies. Vercel never hosts the scheduler; `SUPABASE_CONNECTION_STRING` is an alias for `SUPABASE_URL` on Render; `WORKER_REGISTRATION_SECRET` is an alias for `WORKER_REGISTRATION_TOKEN`.
 
 ## 8. User constraints
 
@@ -142,6 +153,8 @@ The dashboard must work well from an Android phone:
 - usable for monitoring and approval
 - video preview on mobile
 
+`/runtimes` (the runtime auto-start control surface) is explicitly mobile-first: stacked schedule cards, touch-friendly `Run Now` / Edit / Pause / Delete, `days_of_week` chip toggles, and an inline edit sheet — no desktop required.
+
 ## 9. Development philosophy
 
 Build the real architecture first and connect real services as their adapters are implemented.
@@ -152,8 +165,9 @@ If a service is unavailable, show its actual state: OFFLINE, WAITING, FAILED, et
 
 Preserve working infrastructure and avoid unnecessary rewrites.
 
+The Runtime Supervisor slice demonstrates this: real Supabase-persisted schedules with timezone-aware `nextRunUtc` (Intl-based, handles `Africa/Lagos` DST scan), real Kaggle auth probe (no fake execution), real `NOT_AUTOSTARTABLE` for Colab with an explicit reason, and heartbeat-gated `ONLINE` (never from a request alone).
 
-## 9. External runtime scheduling
+## 10. External runtime scheduling
 
 Ostra may automatically start temporary AI runtimes so the creator does not need to manually start every notebook/session.
 
