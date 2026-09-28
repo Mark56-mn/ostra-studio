@@ -249,10 +249,48 @@ after** the heartbeat arrives and to `OFFLINE` with "heartbeat expired" after th
 
 ## 12. Verification
 
-- Verified locally: 134 tests, both typechecks, `next build`, the tsx smoke import, and the CORS/health
+- Verified locally: 136 tests, both typechecks, `next build`, the tsx smoke import, and the CORS/health
   behaviour of the **old** live build.
+- Verified against the live Kaggle API (read-only, real token): auth accepted, `bettertrade/notebook7eae283a4a`
+  read successfully (`currentVersionNumber=6`, source 20194 chars). See §13.
 - **Unverified / not attempted:** the live Render deployment of this code (deploy pending), the live Vercel
-  deployment, `NEXT_PUBLIC_API_URL` on Vercel, a real Kaggle push for `bettertrade/notebook7eae283a4a`, a
-  real worker registration/heartbeat/ONLINE→OFFLINE transition, and the Colab Image/Voice runtimes.
+  deployment, `NEXT_PUBLIC_API_URL` on Vercel, a real Kaggle **push** (a run was deliberately not started),
+  a real worker registration/heartbeat/ONLINE→OFFLINE transition, and the Colab Image/Voice runtimes.
 - **The Script AI worker has NOT been observed ONLINE.** Do not report it as online until the heartbeat is
   actually seen. `bun --filter @ostra/web lint` could not be run (no ESLint config committed).
+
+## 13. Live Kaggle verification (added after §12)
+
+A real `KAGGLE_API_TOKEN` (`KGAT_*`, 37 chars) was present in the workspace `.env` for this session, so the
+Kaggle path was exercised for real via the new `bun run verify:kaggle`
+(`scripts/kaggle-live-check.ts` — unmocked, read-only by default).
+
+**Observed (read-only):** `GET /api/v1/kernels/list?pageSize=1` → 200 (token accepted);
+`GET /api/v1/kernels/pull?user_name=bettertrade&kernel_slug=notebook7eae283a4a` → 200,
+`title=notebook7eae283a4a`, `language=python`, `kernelType=notebook`, `source` 20194 chars,
+`currentVersionNumber=6`, `enableInternet=true enableGpu=true isPrivate=false`. A push would therefore
+produce `provider_run_id=bettertrade/notebook7eae283a4a@v7`.
+
+**Three real bugs found and fixed in `KaggleRuntimeStarter`** — the old code could never start a run even
+with perfect credentials, because it failed its own auth gate first:
+
+1. `GET /api/v1/kernels/list?mine=true&pageSize=1` → **HTTP 400 `Invalid field 'mine'`**. `mine` is not a
+   Kaggle API field. Now `?pageSize=1`; owner-scoped searches use `group=profile`.
+2. `GET /api/v1/kernels/{owner}/{slug}` → **HTTP 404 `text/html`** (the website page, not the API). The
+   notebook source now comes from `/api/v1/kernels/pull?user_name=&kernel_slug=`.
+3. Kernel settings were read from the wrong level (`blob` instead of `metadata`), so a push would have
+   silently overwritten the operator's `isPrivate` / `enableInternet` / `enableGpu` / `enableTpu`. They are
+   now taken from `metadata` and echoed in `provider_response`.
+
+Also: a missing/unreadable kernel source now fails immediately with the real HTTP status
+(`NOT_AUTOSTARTABLE` on 404, `AUTH_FAILED` on 401/403) and **never calls push** with an empty body.
+
+**Still blocking a real ONLINE (not a code problem):** the notebook
+`bettertrade/notebook7eae283a4a` starts Qwen3-1.7B + FastAPI on `:8000` and opens an ngrok tunnel, but its
+cells contain **no call to `POST /api/workers/register` and no heartbeat loop**. Until a cell registers the
+worker with `WORKER_REGISTRATION_TOKEN`, `GET /api/workers` will stay empty and Script AI can never be
+`ONLINE` — it will correctly sit at `STARTING` and then `OFFLINE` with a stale-heartbeat reason.
+
+**Not done on purpose:** no `--push` was issued, so no Kaggle run/quota was consumed and no new public
+kernel version was created. `bun run verify:kaggle --push` is the one-command next step and needs explicit
+go-ahead.

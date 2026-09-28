@@ -93,8 +93,17 @@ PORT=3001                                 # Render injects PORT; 3001 is the loc
 
 - Starter: `KaggleRuntimeStarter` (`packages/shared/src/providers/runtimeStarters.ts`)
 - Auth: `KAGGLE_API_TOKEN` (may be JSON `{"username","key"}`, `username:key` Basic, or `KGAT_*` Bearer) via `getKaggleAuthHeader()`.
-- Kernel ref: `KAGGLE_KERNEL_REF` is `bettertrade/notebook7eae283a4a` (verified exact notebook for §38). Legacy bare `notebook7eae283a4a` is also supported via `resolveKaggleKernelRef()` → `GET /api/v1/kernels/list?mine=true&search=` + owner inference; `bettertrade/notebook7eae283a4a` with slash bypasses that search and goes direct to `GET /api/v1/kernels/bettertrade/notebook7eae283a4a` → `POST /api/v1/kernels/push`.
-- Flow: `GET /api/v1/kernels/list?mine=true&pageSize=1` auth check → `GET /api/v1/kernels/{owner}/{slug}` fetch source → `POST /api/v1/kernels/push` (`ApiSaveKernelRequest{ slug, text, language, kernelType, isPrivate, enableInternet, … }`) — the SDK equivalent `kaggle.kernels.kernels_api_client.save_kernel(...)`. On success, response `ApiSaveKernelResponse{ versionNumber, url, ref }` is mapped to `provider_run_id = ref@vN` (never synthetic `kaggle:startup_request_id`).
+- Kernel ref: `KAGGLE_KERNEL_REF` is `bettertrade/notebook7eae283a4a` (verified exact notebook for §38). A bare `notebook7eae283a4a` is resolved by `resolveKaggleKernelRef()` via `GET /api/v1/kernels/list?group=profile&pageSize=100&search=<slug>`; a ref containing `/` skips that search entirely.
+- Flow (all three endpoints verified against the live Kaggle API):
+  1. `GET /api/v1/kernels/list?pageSize=1` — cheap auth gate; 401/403 → `AUTH_FAILED`.
+  2. `GET /api/v1/kernels/pull?user_name={owner}&kernel_slug={slug}` — returns `{ blob: { source, language, kernelType }, metadata: { title, currentVersionNumber, isPrivate, enableInternet, enableGpu, enableTpu } }`. The `source` is required: Kaggle triggers a run by accepting a new version.
+  3. `POST /api/v1/kernels/push` with `{ slug, newTitle, text, language, kernelType, isPrivate, enableInternet, enableGpu, enableTpu }` → `ApiSaveKernelResponse{ versionNumber, url, ref }` → `provider_run_id = ref@vN` (never synthetic `kaggle:startup_request_id`). The kernel's own `metadata` settings are reused, so a push restarts the runtime without silently rewriting the operator's internet/accelerator/visibility choices.
+- Live-API gotchas that previously broke this path silently — do not reintroduce them:
+  - `/api/v1/kernels/list` rejects `mine=true` with HTTP 400 `Invalid field 'mine'`. Use `group=profile` to scope a search to the token owner.
+  - `GET /api/v1/kernels/{owner}/{slug}` serves the **HTML site page** (HTTP 404, `text/html` for API clients). The notebook source must come from `/kernels/pull`.
+  - `KGAT_*` tokens authenticate as `Bearer`, not Basic. Basic `username:key` is only for legacy keys.
+- If the source cannot be read, the starter fails with the real HTTP status and **never** calls push.
+- Verify credentials without starting a run: `bun run verify:kaggle --kernel-ref=bettertrade/notebook7eae283a4a` (add `--push` to start a real version).
 - Quota/rate mapping: 401/403→`AUTH_FAILED`, 429→`RATE_LIMITED`, 402→`QUOTA_EXCEEDED`.
 
 ### Colab auto-start detail (real API, truthful when not allowlisted)

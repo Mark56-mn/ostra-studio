@@ -149,11 +149,11 @@ describe("runtimeStarters", () => {
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       calls.push(`${(init?.method ?? "GET")} ${url}`);
-      if (url.includes("/api/v1/kernels/list?mine=true&pageSize=1")) {
+      if (url.includes("/api/v1/kernels/list?pageSize=1")) {
         // verify auth — success
         return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
       }
-      if (url.includes("/api/v1/kernels/mark56/test-kernel")) {
+      if (url.includes("/api/v1/kernels/pull?user_name=mark56&kernel_slug=test-kernel")) {
         // canonical get — return blob with source
         return new Response(
           JSON.stringify({
@@ -193,8 +193,8 @@ describe("runtimeStarters", () => {
         assert.ok(r.provider_response);
       }
       // Ensure we called all three endpoints
-      assert.ok(calls.some((c) => c.includes("list?mine=true&pageSize=1")));
-      assert.ok(calls.some((c) => c.includes("/kernels/mark56/test-kernel")));
+      assert.ok(calls.some((c) => c.includes("list?pageSize=1")));
+      assert.ok(calls.some((c) => c.includes("/kernels/pull?user_name=mark56&kernel_slug=test-kernel")));
       assert.ok(calls.some((c) => c.includes("/kernels/push")));
     } finally {
       restoreEnv([...envKeys]);
@@ -211,8 +211,8 @@ describe("runtimeStarters", () => {
 
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.includes("/kernels/list?mine=true&pageSize=1")) return new Response("[]", { status: 200 });
-      if (url.includes("/kernels/ownerX/slugY")) {
+      if (url.includes("/kernels/list?pageSize=1")) return new Response("[]", { status: 200 });
+      if (url.includes("/kernels/pull?user_name=ownerX&kernel_slug=slugY")) {
         return new Response(JSON.stringify({ source: "print(1)", language: "python" }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
       if (url.includes("/kernels/push")) {
@@ -244,7 +244,7 @@ describe("runtimeStarters", () => {
 
     globalThis.fetch = async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes("/kernels/list?mine=true&pageSize=1")) {
+      if (url.includes("/kernels/list?pageSize=1")) {
         return new Response(JSON.stringify({ code: 401, message: "Unauthorized" }), { status: 401 });
       }
       return new Response("nope", { status: 500 });
@@ -270,8 +270,8 @@ describe("runtimeStarters", () => {
 
     globalThis.fetch = async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes("/kernels/list?mine=true&pageSize=1")) return new Response("[]", { status: 200 });
-      if (url.includes("/kernels/u/slug")) return new Response(JSON.stringify({ source: "x=1" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.includes("/kernels/list?pageSize=1")) return new Response("[]", { status: 200 });
+      if (url.includes("/kernels/pull?user_name=u&kernel_slug=slug")) return new Response(JSON.stringify({ source: "x=1" }), { status: 200, headers: { "Content-Type": "application/json" } });
       if (url.includes("/kernels/push")) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
       return new Response("nope", { status: 500 });
     };
@@ -295,12 +295,12 @@ describe("runtimeStarters", () => {
 
     globalThis.fetch = async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes("/kernels/list?mine=true&pageSize=1")) return new Response("[]", { status: 200 });
-      if (url.includes("/kernels/owner/slugMissingText")) {
+      if (url.includes("/kernels/list?pageSize=1")) return new Response("[]", { status: 200 });
+      if (url.includes("/kernels/pull?user_name=owner&kernel_slug=slugMissingText")) {
         // Return 200 but without source/text, so kernelText stays null
         return new Response(JSON.stringify({ title: "empty", language: "python" }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
-      if (url.includes("/kernels/list?mine=true&pageSize=100&search=slugMissingText")) {
+      if (url.includes("/kernels/list?group=profile&pageSize=100&search=slugMissingText")) {
         // fallback from 404 path not hit because first was 200; but if code does 404 fallback, handle
         return new Response(JSON.stringify({ kernels: [] }), { status: 200 });
       }
@@ -337,12 +337,12 @@ describe("runtimeStarters", () => {
 
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      // resolveKaggleKernelRef will call /kernels/list?mine=true&pageSize=100&search=notebook7eae283a4a
-      if (url.includes("/kernels/list?mine=true&pageSize=100&search=") && url.includes("notebook7eae283a4a")) {
+      // resolveKaggleKernelRef will call /kernels/list?group=profile&pageSize=100&search=notebook7eae283a4a
+      if (url.includes("/kernels/list?group=profile&pageSize=100&search=") && url.includes("notebook7eae283a4a")) {
         return new Response(JSON.stringify([{ ref: "testuser2/notebook7eae283a4a", slug: "notebook7eae283a4a" }]), { status: 200, headers: { "Content-Type": "application/json" } });
       }
-      if (url.includes("/kernels/list?mine=true&pageSize=1")) return new Response("[]", { status: 200 });
-      if (url.includes("/kernels/testuser2/notebook7eae283a4a")) {
+      if (url.includes("/kernels/list?pageSize=1")) return new Response("[]", { status: 200 });
+      if (url.includes("/kernels/pull?user_name=testuser2&kernel_slug=notebook7eae283a4a")) {
         return new Response(JSON.stringify({ source: "print('legacy')", language: "python" }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
       if (url.includes("/kernels/push")) {
@@ -378,10 +378,10 @@ describe("runtimeStarters", () => {
       const url = String(input);
       calls.push(`${init?.method ?? "GET"} ${url}`);
       // resolveKaggleKernelRef with slash returns immediately — no search fetch expected
-      if (url.includes("/api/v1/kernels/list?mine=true&pageSize=1")) {
+      if (url.includes("/api/v1/kernels/list?pageSize=1")) {
         return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
       }
-      if (url.includes("/api/v1/kernels/bettertrade/notebook7eae283a4a") && (init?.method ?? "GET") !== "POST") {
+      if (url.includes("/api/v1/kernels/pull?user_name=bettertrade&kernel_slug=notebook7eae283a4a") && (init?.method ?? "GET") !== "POST") {
         return new Response(JSON.stringify({ blob: { source: "print('hello bettertrade qwen')", language: "python", kernelType: "notebook", title: "notebook7eae283a4a", isPrivate: true, enableInternet: true } }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
       if (url.includes("/api/v1/kernels/push")) {
@@ -406,9 +406,93 @@ describe("runtimeStarters", () => {
         assert.ok(r.provider_response, "provider_response present");
         // ensure no legacy search was triggered (has slash)
         assert.ok(!calls.some(c => c.includes("search=notebook7eae283a4a") && c.includes("pageSize=100")), "bettertrade/notebook7eae283a4a with slash should not trigger legacy search");
-        assert.ok(calls.some(c => c.includes("/kernels/bettertrade/notebook7eae283a4a")));
+        assert.ok(calls.some(c => c.includes("/kernels/pull?user_name=bettertrade&kernel_slug=notebook7eae283a4a")));
         assert.ok(calls.some(c => c.includes("/kernels/push")));
       }
+    } finally {
+      restoreEnv([...envKeys]);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("Kaggle regression: uses the pull endpoint and never the invalid mine=true field", async () => {
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_EXEC_DISABLED"] as const;
+    saveEnv([...envKeys]);
+    process.env.KAGGLE_API_TOKEN = "u:k";
+    delete process.env.KAGGLE_EXEC_DISABLED;
+    const s = new KaggleRuntimeStarter({ apiToken: "u:k", kernelRef: "owner/notebook7eae283a4a" });
+    const calls: string[] = [];
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      if (url.includes("/kernels/list?pageSize=1")) {
+        return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/kernels/pull?user_name=owner&kernel_slug=notebook7eae283a4a")) {
+        return new Response(
+          JSON.stringify({
+            blob: { source: "print(1)", language: "python", kernelType: "notebook" },
+            metadata: { title: "notebook7eae283a4a", currentVersionNumber: 6, isPrivate: true, enableInternet: false, enableGpu: false },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.includes("/kernels/push")) {
+        return new Response(JSON.stringify({ ref: "owner/notebook7eae283a4a", versionNumber: 7 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("not mocked", { status: 500 });
+    };
+    try {
+      const r = await s.start({ worker_type: "script", runtime: "kaggle", provider: "kaggle", trigger_source: "run_now", config: {} });
+      assert.equal(r.ok, true);
+      if (r.ok) {
+        assert.equal(r.provider_run_id, "owner/notebook7eae283a4a@v7");
+        // The kernel's own settings must be preserved rather than overwritten by starter defaults.
+        assert.equal(r.provider_response["enableInternet"], false, "must reuse the kernel's enableInternet");
+        assert.equal(r.provider_response["previousVersion"], 6, "must report the pre-push version");
+      }
+      for (const c of calls) {
+        // Verified against the live API: Kaggle answers mine=true with HTTP 400 "Invalid field 'mine'".
+        assert.ok(!c.includes("mine=true"), `Kaggle rejects mine=true: ${c}`);
+        // ...and /api/v1/kernels/{owner}/{slug} serves the HTML site page, not JSON.
+        assert.ok(!/\/api\/v1\/kernels\/owner\/notebook7eae283a4a$/.test(c), `must not use the HTML kernel page URL: ${c}`);
+      }
+      assert.ok(calls.some((c) => c.includes("/kernels/pull?user_name=")), "must read the kernel source via the pull endpoint");
+    } finally {
+      restoreEnv([...envKeys]);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("Kaggle unreachable kernel source fails truthfully and never calls push", async () => {
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_EXEC_DISABLED"] as const;
+    saveEnv([...envKeys]);
+    process.env.KAGGLE_API_TOKEN = "u:k";
+    delete process.env.KAGGLE_EXEC_DISABLED;
+    const s = new KaggleRuntimeStarter({ apiToken: "u:k", kernelRef: "owner/missingKernel" });
+    const calls: string[] = [];
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      if (url.includes("/kernels/list?pageSize=1")) {
+        return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/kernels/pull")) return new Response("", { status: 404 });
+      if (url.includes("/kernels/list?group=profile")) {
+        return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response("not mocked", { status: 500 });
+    };
+    try {
+      const r = await s.start({ worker_type: "script", runtime: "kaggle", provider: "kaggle", trigger_source: "run_now", config: {} });
+      assert.equal(r.ok, false, "a kernel we cannot read must not report success");
+      assert.equal((r as { code?: string }).code, "NOT_AUTOSTARTABLE");
+      assert.ok(String((r as { error: string }).error).includes("404"), "error must carry the real HTTP status");
+      assert.equal((r as { provider_run_id?: string }).provider_run_id, undefined, "no provider_run_id on failure");
+      assert.ok(!calls.some((c) => c.includes("/kernels/push")), "must not push without kernel source");
     } finally {
       restoreEnv([...envKeys]);
       globalThis.fetch = originalFetch;
@@ -634,8 +718,8 @@ describe("runtimeStarters", () => {
     const s = new KaggleRuntimeStarter({ apiToken: "u:k", kernelRef: "a/b2" });
     globalThis.fetch = async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes("/kernels/list?mine=true&pageSize=1")) return new Response("[]", { status: 200 });
-      if (url.includes("/kernels/a/b2")) return new Response(JSON.stringify({ source: "x=1", language: "python" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.includes("/kernels/list?pageSize=1")) return new Response("[]", { status: 200 });
+      if (url.includes("/kernels/pull?user_name=a&kernel_slug=b2")) return new Response(JSON.stringify({ source: "x=1", language: "python" }), { status: 200, headers: { "Content-Type": "application/json" } });
       if (url.includes("/kernels/push")) return new Response(JSON.stringify({ ref: "a/b2", versionNumber: 10 }), { status: 200 });
       return new Response("nope", { status: 500 });
     };

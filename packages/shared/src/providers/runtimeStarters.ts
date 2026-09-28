@@ -38,7 +38,9 @@ export function redactSecrets(obj: Record<string, unknown> | null | undefined): 
 }
 
 // ── Kaggle helpers ───────────────────────────────────────────────────────────
-function getKaggleAuthHeader(token: string): string {
+// Exported so diagnostics (scripts/kaggle-live-check.ts) reuse the exact production auth
+// logic instead of duplicating it and silently drifting from real behaviour.
+export function getKaggleAuthHeader(token: string): string {
   const t = token.trim();
   if (!t) return "";
   // Handle JSON form {"username":"...","key":"..."}
@@ -82,7 +84,7 @@ function inferKaggleOwnerFromToken(token: string): string | null {
   return null;
 }
 
-function parseKernelRef(raw: string): { owner: string | null; slug: string; raw: string } {
+export function parseKernelRef(raw: string): { owner: string | null; slug: string; raw: string } {
   const r = raw.trim();
   if (r.includes("/")) {
     const [owner, slug] = r.split("/", 2) as [string, string];
@@ -105,7 +107,9 @@ async function resolveKaggleKernelRef(token: string, kernelRef: string): Promise
       try {
         const headers: Record<string,string> = { Authorization: getKaggleAuthHeader(token) };
         // Verify candidate exists via get check? Use list?mine=true pageSize 100 search
-        const url = `https://www.kaggle.com/api/v1/kernels/list?mine=true&pageSize=100&search=${encodeURIComponent(ref)}`;
+        // NOTE: the Kaggle REST API has no `mine` field (HTTP 400). `group=profile` scopes the
+        // search to the authenticated token owner, which is what we want here.
+        const url = `https://www.kaggle.com/api/v1/kernels/list?group=profile&pageSize=100&search=${encodeURIComponent(ref)}`;
         const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) } as RequestInit);
         if (res.ok) {
           const data = await res.json().catch(()=> null) as unknown;
@@ -129,7 +133,8 @@ async function resolveKaggleKernelRef(token: string, kernelRef: string): Promise
     // If no owner in token, try list search without owner inference (search globally)
     try {
       const headers: Record<string,string> = { Authorization: getKaggleAuthHeader(token) };
-      const url = `https://www.kaggle.com/api/v1/kernels/list?mine=true&pageSize=100&search=${encodeURIComponent(ref)}`;
+      // NOTE: `mine=true` is not a Kaggle API field (HTTP 400); `group=profile` lists the token owner's kernels.
+      const url = `https://www.kaggle.com/api/v1/kernels/list?group=profile&pageSize=100&search=${encodeURIComponent(ref)}`;
       const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) } as RequestInit);
       if (res.ok) {
         const data = await res.json().catch(()=> null) as unknown;
@@ -148,11 +153,14 @@ async function resolveKaggleKernelRef(token: string, kernelRef: string): Promise
   return ref;
 }
 
-function mapKaggleHttpError(status: number, _body: string): { code: StarterErrorCode; msg: string } {
+function mapKaggleHttpError(status: number, body: string): { code: StarterErrorCode; msg: string } {
   if (status === 401 || status === 403) return { code: "AUTH_FAILED" as never, msg: `Kaggle auth failed (HTTP ${status}) — check KAGGLE_API_TOKEN` };
   if (status === 429) return { code: "RATE_LIMITED" as never, msg: `Kaggle rate-limited (HTTP ${status})` };
-  if (status === 402 || status === 429) return { code: "QUOTA_EXCEEDED" as never, msg: `Kaggle quota exceeded (HTTP ${status})` };
-  return { code: "UNKNOWN" as never, msg: `Kaggle request failed (HTTP ${status})` };
+  if (status === 402) return { code: "QUOTA_EXCEEDED" as never, msg: `Kaggle quota exceeded (HTTP ${status})` };
+  if (status === 404) return { code: "NOT_AUTOSTARTABLE" as never, msg: `Kaggle kernel not found (HTTP 404) — check KAGGLE_KERNEL_REF and that the token owns it` };
+  // Surface Kaggle's own validation message; it is the actionable part (e.g. a bad push payload).
+  const detail = body.trim().slice(0, 200);
+  return { code: "UNKNOWN" as never, msg: `Kaggle request failed (HTTP ${status})${detail ? `: ${detail}` : ""}` };
 }
 
 // ── Kaggle starter (real execution) ─────────────────────────────────────────
@@ -212,8 +220,9 @@ export class KaggleRuntimeStarter implements RuntimeStarter {
     // If that succeeds, we know the kernel exists and token is valid. If it fails with 401/403 -> AUTH_FAILED.
     try {
       const headers: Record<string,string> = { Authorization: authHeader };
-      // Try to verify via kernels/list?mine=true&pageSize=1 first (cheap), then via direct get if we have owner
-      const verifyUrl = "https://www.kaggle.com/api/v1/kernels/list?mine=true&pageSize=1";
+      // Cheap authenticated call whose only job is to separate "bad token" (401) from "token is fine".
+      // `pageSize=1` with no other filters is a valid Kaggle query; `mine=true` is not (HTTP 400).
+      const verifyUrl = "https://www.kaggle.com/api/v1/kernels/list?pageSize=1";
       const verifyRes = await fetch(verifyUrl, { headers, signal: AbortSignal.timeout(8000) } as RequestInit);
       if (!verifyRes.ok) {
         const status = verifyRes.status;
@@ -242,19 +251,21 @@ export class KaggleRuntimeStarter implements RuntimeStarter {
     let enableInternet = true;
     let enableGpu = false;
     let enableTpu = false;
+    let previousVersion: number | string | undefined;
+    let pullFailed: { status: number; body: string } | null = null;
 
     if (owner) {
       try {
-        void `https://www.kaggle.com/api/v1/kernels/pull?kernel=${encodeURIComponent(`${owner}/${slug}`)}`;
-        // Kaggle's pull is actually via get_kernel with user_name/kernel_slug, but we try the REST pull
-        // The SDK uses ApiGetKernelRequest -> backend may be GET /api/v1/kernels/{user}/{slug}
-        // Try canonical GET first
+        // The kernel AND its notebook source come from GET /api/v1/kernels/pull?user_name=&kernel_slug=.
+        // Verified against the live API: GET /api/v1/kernels/{owner}/{slug} returns the HTML site
+        // page (HTTP 404 with text/html), so it can never supply the source we must re-push.
         const headers: Record<string,string> = { Authorization: authHeader };
-        const canonicalUrl = `https://www.kaggle.com/api/v1/kernels/${encodeURIComponent(owner)}/${encodeURIComponent(slug)}`;
-        let getRes = await fetch(canonicalUrl, { headers, signal: AbortSignal.timeout(10000) } as RequestInit);
-        // Fallback to list with search if canonical 404
-        if (!getRes.ok && getRes.status === 404) {
-          const searchUrl = `https://www.kaggle.com/api/v1/kernels/list?mine=true&pageSize=100&search=${encodeURIComponent(slug)}`;
+        const canonicalUrl = `https://www.kaggle.com/api/v1/kernels/pull?user_name=${encodeURIComponent(owner)}&kernel_slug=${encodeURIComponent(slug)}`;
+        let getRes = await fetch(canonicalUrl, { headers, signal: AbortSignal.timeout(20000) } as RequestInit);
+        // Fallback to an owner-scoped search if the pull path changes shape.
+        if (!getRes.ok) {
+          pullFailed = { status: getRes.status, body: await getRes.text().catch(() => "") };
+          const searchUrl = `https://www.kaggle.com/api/v1/kernels/list?group=profile&pageSize=100&search=${encodeURIComponent(slug)}`;
           getRes = await fetch(searchUrl, { headers, signal: AbortSignal.timeout(8000) } as RequestInit);
           if (getRes.ok) {
             const data = await getRes.json().catch(()=> null) as unknown;
@@ -270,18 +281,22 @@ export class KaggleRuntimeStarter implements RuntimeStarter {
         } else if (getRes.ok) {
           const data = await getRes.json().catch(()=> null) as unknown as Record<string, unknown> | null;
           if (data) {
-            // Kaggle's get returns blob-like structure
+            // Shape: { blob: { source, language, kernelType }, metadata: { title, isPrivate, … } }
             const blob = (data.blob as Record<string, unknown>) ?? data;
+            const meta = (data.metadata as Record<string, unknown>) ?? {};
             if (blob) {
               kernelText = (blob.source as string) ?? (blob.text as string) ?? (data.source as string) ?? (data.text as string) ?? null;
-              language = (blob.language as string) ?? language;
-              kernelType = (blob.kernelType as string) ?? (blob.kernel_type as string) ?? kernelType;
-              title = (blob.title as string) ?? (data.title as string) ?? undefined;
-              isPrivate = (blob.isPrivate as boolean) ?? isPrivate;
-              enableInternet = (blob.enableInternet as boolean) ?? enableInternet;
-              enableGpu = (blob.enableGpu as boolean) ?? enableGpu;
-              enableTpu = (blob.enableTpu as boolean) ?? enableTpu;
+              language = (blob.language as string) ?? (meta.language as string) ?? language;
+              kernelType = (blob.kernelType as string) ?? (blob.kernel_type as string) ?? (meta.kernelType as string) ?? kernelType;
             }
+            // Preserve the kernel's existing settings. Pushing must restart the runtime, not silently
+            // rewrite the operator's internet / accelerator / visibility choices.
+            title = (meta.title as string) ?? (blob.title as string) ?? undefined;
+            isPrivate = (meta.isPrivate as boolean) ?? (blob.isPrivate as boolean) ?? isPrivate;
+            enableInternet = (meta.enableInternet as boolean) ?? (blob.enableInternet as boolean) ?? enableInternet;
+            enableGpu = (meta.enableGpu as boolean) ?? (blob.enableGpu as boolean) ?? enableGpu;
+            enableTpu = (meta.enableTpu as boolean) ?? (blob.enableTpu as boolean) ?? enableTpu;
+            previousVersion = (meta.currentVersionNumber as number) ?? undefined;
           }
         }
       } catch {
@@ -289,17 +304,19 @@ export class KaggleRuntimeStarter implements RuntimeStarter {
       }
     }
 
-    // If we still don't have text, try alternative: use kernels pull via api/v1/kernels/pull endpoint (kaggle api)
-    // For now, if text missing, we cannot push empty body — return a clear error rather than fabricating.
+    // Kaggle triggers a run by accepting a NEW VERSION, which requires the notebook source. Without it
+    // there is nothing to push, so report the real reason rather than firing a request we know is empty.
     if (!kernelText) {
-      // Attempt one more fallback: try to list kernel files/output to infer existence, but push requires text.
-      // Instead, we treat missing text as a push failure with real error, not synthetic success.
-      // We could try to push a minimal placeholder that triggers execution by re-saving same slug with enableInternet?
-      // Better to return FAILED with actionable message, preserving truth.
-      // However, some kernels are scripts where text is required; for notebooks, the push expects JSON.
-      // We will attempt a minimal push with empty text and let Kaggle tell us what's wrong — still real.
-      // But to avoid sending empty, we will attempt to push via the SDK's save_kernel equivalent with minimal fields
-      // and capture the real error.
+      const status = pullFailed?.status;
+      const reason = status
+        ? `Kaggle could not return the kernel source for ${owner}/${slug} (HTTP ${status})`
+        : `Kaggle returned no source for ${owner}/${slug}`;
+      return {
+        ok: false,
+        error: `${reason}${pullFailed?.body ? `: ${pullFailed.body.slice(0, 200)}` : ""}. Nothing was started.`,
+        code: (status === 401 || status === 403 ? "AUTH_FAILED" : status === 404 ? "NOT_AUTOSTARTABLE" : "UNKNOWN") as never,
+        provider_response: redactSecrets({ reason: "kernel_source_unavailable", kernelRef, httpStatus: status }) ?? {},
+      };
     }
 
     // Step 3: Push to trigger execution
@@ -368,7 +385,19 @@ export class KaggleRuntimeStarter implements RuntimeStarter {
         ok: true,
         startup_request_id,
         provider_run_id: String(provider_run_id),
-        provider_response: redactSecrets({ step: "push_succeeded", kernelRef: ref, versionNumber, url, at: new Date().toISOString() }) ?? {},
+        provider_response: redactSecrets({
+          step: "push_succeeded",
+          kernelRef: ref,
+          previousVersion: previousVersion ?? null,
+          versionNumber,
+          url,
+          // The running worker's ability to tunnel + register depends on these; surface them honestly.
+          enableInternet,
+          enableGpu,
+          enableTpu,
+          isPrivate,
+          at: new Date().toISOString(),
+        }) ?? {},
         initial_state: "requested",
       };
     } catch (e) {
