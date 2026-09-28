@@ -98,6 +98,7 @@ PORT=3001                                 # Render injects PORT; 3001 is the loc
   1. `GET /api/v1/kernels/list?pageSize=1` — cheap auth gate; 401/403 → `AUTH_FAILED`.
   2. `GET /api/v1/kernels/pull?user_name={owner}&kernel_slug={slug}` — returns `{ blob: { source, language, kernelType }, metadata: { title, currentVersionNumber, isPrivate, enableInternet, enableGpu, enableTpu } }`. The `source` is required: Kaggle triggers a run by accepting a new version.
   3. `POST /api/v1/kernels/push` with `{ slug, newTitle, text, language, kernelType, isPrivate, enableInternet, enableGpu, enableTpu }` → `ApiSaveKernelResponse{ versionNumber, url, ref }` → `provider_run_id = ref@vN` (never synthetic `kaggle:startup_request_id`). The kernel's own `metadata` settings are reused, so a push restarts the runtime without silently rewriting the operator's internet/accelerator/visibility choices.
+     - Verified live: the push reply returns `ref` in the **site form** (`"/code/owner/slug"`, e.g. `/code/bettertrade/notebook7eae283a4a`). `canonicalizeKernelRef()` strips the leading `/` and the `code/` segment so `provider_run_id` stays `owner/slug@vN` and matches leases, history, provider health and worker registration; the raw value is preserved as `provider_response.providerRef`.
 - Live-API gotchas that previously broke this path silently — do not reintroduce them:
   - `/api/v1/kernels/list` rejects `mine=true` with HTTP 400 `Invalid field 'mine'`. Use `group=profile` to scope a search to the token owner.
   - `GET /api/v1/kernels/{owner}/{slug}` serves the **HTML site page** (HTTP 404, `text/html` for API clients). The notebook source must come from `/kernels/pull`.
@@ -105,6 +106,24 @@ PORT=3001                                 # Render injects PORT; 3001 is the loc
 - If the source cannot be read, the starter fails with the real HTTP status and **never** calls push.
 - Verify credentials without starting a run: `bun run verify:kaggle --kernel-ref=bettertrade/notebook7eae283a4a` (add `--push` to start a real version).
 - Quota/rate mapping: 401/403→`AUTH_FAILED`, 429→`RATE_LIMITED`, 402→`QUOTA_EXCEEDED`.
+
+### Kaggle notebook bootstrap (what actually makes Script AI ONLINE)
+
+The push only **requests** a run. The notebook itself must then register and keep heartbeating —
+`deriveProviderHealth()` never reports ONLINE from configuration or from a successful push.
+
+- Canonical cell: `scripts/kaggle-worker-bootstrap.py`, marked with `# ── Ostra Studio worker bootstrap (managed cell) ──`.
+- It reads two **Kaggle secrets** (Add-ons → Secrets):
+  - `WORKER_REGISTRATION_TOKEN` (**required**) — must equal the backend value.
+  - `OSTRA_API_URL` (optional) — defaults to `https://ostra-studio-1.onrender.com`.
+- It registers via `POST /api/workers/register` (header `x-worker-token`), reporting
+  `endpoint = PUBLIC_URL` (the ngrok tunnel the notebook opens), then heartbeats
+  `POST /api/workers/heartbeat` every 30s — comfortably under `WORKER_HEARTBEAT_TIMEOUT_SEC=90`.
+  A 404 heartbeat re-registers instead of silently going dark.
+- If the token is missing the cell prints `NOT REGISTERED` and starts **no** heartbeat. It never fakes ONLINE.
+- Keep the live notebook in sync with the committed cell:
+  `bun run sync:notebook` (dry run) → `bun run sync:notebook --apply` (pushes a **REAL** new kernel version).
+  `bun run sync:notebook --dump [--dump-full]` reads the live cell structure without writing.
 
 ### Colab auto-start detail (real API, truthful when not allowlisted)
 

@@ -11,6 +11,7 @@
     "typecheck": "bun --filter @ostra/web typecheck && bun --filter @ostra/api build",
     "test": "bun test",
     "verify:kaggle": "bun scripts/kaggle-live-check.ts",
+    "sync:notebook": "bun scripts/kaggle-sync-notebook.ts",
     "lint": "bun --filter @ostra/web lint"
   }
 }

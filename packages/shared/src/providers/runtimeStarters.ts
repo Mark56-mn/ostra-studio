@@ -93,6 +93,23 @@ export function parseKernelRef(raw: string): { owner: string | null; slug: strin
   return { owner: null, slug: r, raw: r };
 }
 
+/**
+ * Normalize a Kaggle ref into our canonical "owner/slug" form.
+ *
+ * Kaggle's push response returns `ref` in the site's form, e.g. "/code/owner/slug" (verified against
+ * the live API on 2026-09-28). Everywhere else — leases, history, provider health and worker
+ * registration — the runtime id is "owner/slug", so a raw site ref would never correlate. This only
+ * strips Kaggle's own prefixes; it never invents a value, falling back to the owner/slug we resolved
+ * for this start.
+ */
+export function canonicalizeKernelRef(raw: string | null | undefined, owner: string | null, slug: string): string {
+  const trimmed = (raw ?? "").trim().replace(/^\/+/, "");
+  const withoutCode = trimmed.startsWith("code/") ? trimmed.slice("code/".length) : trimmed;
+  if (withoutCode.includes("/")) return withoutCode;
+  if (!withoutCode) return owner ? `${owner}/${slug}` : slug;
+  return owner ? `${owner}/${withoutCode}` : withoutCode;
+}
+
 async function resolveKaggleKernelRef(token: string, kernelRef: string): Promise<string> {
   const ref = kernelRef.trim();
   if (ref.includes("/")) return ref; // already owner/slug
@@ -370,7 +387,10 @@ export class KaggleRuntimeStarter implements RuntimeStarter {
 
       // Success: Kaggle returns versionNumber, ref, url, etc.
       const versionNumber = (parsed?.versionNumber as number | string | undefined) ?? (parsed?.version_number as number | string | undefined) ?? null;
-      const ref = (parsed?.ref as string) ?? kernelRef;
+      // Kaggle reports `ref` as "/code/owner/slug"; keep the raw value for the audit trail but use the
+      // canonical owner/slug for provider_run_id so it matches leases/history/health and registration.
+      const providerRef = (parsed?.ref as string) ?? null;
+      const ref = canonicalizeKernelRef(providerRef ?? kernelRef, owner, slug);
       const url = (parsed?.url as string) ?? null;
 
       // Real provider_run_id: use versionNumber if present, else url, else ref
@@ -388,6 +408,7 @@ export class KaggleRuntimeStarter implements RuntimeStarter {
         provider_response: redactSecrets({
           step: "push_succeeded",
           kernelRef: ref,
+          providerRef,
           previousVersion: previousVersion ?? null,
           versionNumber,
           url,

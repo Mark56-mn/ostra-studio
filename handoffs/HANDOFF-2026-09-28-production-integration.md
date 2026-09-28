@@ -139,7 +139,7 @@ Modified:
 
 | Command | Result |
 | --- | --- |
-| `bun test` | **134 pass / 0 fail** (9 files: `runtimeStarters` 33, `schedules` 19, `health` 8, `providers/health` 24, `lib/env` 15, `lib/supabase` 7, `lib/cors` 10, `providers/registry` 8, `apps/web/src/lib/api` 10) |
+| `bun test` | **141 pass / 0 fail** (9 files: `runtimeStarters` 40, `schedules` 19, `health` 8, `providers/health` 24, `lib/env` 15, `lib/supabase` 7, `lib/cors` 10, `providers/registry` 8, `apps/web/src/lib/api` 10) |
 | `npm run typecheck` (= `tsc --noEmit` for web + api via workspaces) | **pass, 0 errors** |
 | `npm run build` (`next build` 14.2.35) | **pass** — `✓ Compiled successfully`, `✓ Generating static pages (8/8)` |
 | `tsx --eval` smoke import in `apps/api` | **pass** — `resolveRegistry()` works, `script=NOT_CONFIGURED ("Set KAGGLE_API_TOKEN and KAGGLE_KERNEL_REF on Render")`, `storage=NOT_CONFIGURED ("Set SUPABASE_SERVICE_ROLE_KEY on Render")`, `buildHealthReport()` → `ok=false status=DEGRADED`, `timestamp`/`at` present |
@@ -148,18 +148,18 @@ Modified:
 Note: `next build` initially failed on the new shared modules because Webpack could not resolve the `.js`
 extension on relative imports inside `packages/shared`. Fixed by using extensionless relative imports in
 `health.ts` / `registry.ts` / `lib/supabase.ts` (matching the existing barrel style). Re-verified after the
-change: build, both typechecks and all 134 tests pass.
+change: build, both typechecks and all 141 tests pass.
 
 ## 6. Integration status
 
 | Integration | Status |
 | --- | --- |
 | Render API reachability | **Verified (old build).** `GET https://ostra-studio-1.onrender.com/health` → `200`; `GET /api/health` → `200`; `GET /api/providers` → `200`; `GET /api/workers` → `200 {"workers":[],"source":"supabase"}`. (First `/health` call returned HTTP 000 on a cold start, `200` on retry.) |
-| Render new health contract | **Not verified — deploy pending.** The live responses still show the old shape (`at`, `supabase:"configured"`, `Set KAGGLE_SCRIPT_URL…`), i.e. Render has not yet redeployed `main`. |
+| Render new health contract | **Verified live (new build).** `GET /health` returns the unified envelope: `supabase.status=ONLINE` with a real `reason`/`latencyMs`, and a `providers` map with per-provider `status`+`reason`. `script` reports `OFFLINE — configured but runtime is not running`; image/voice/video/youtube report `NOT_CONFIGURED` with the exact missing key. |
 | Supabase (live) | **Partially verified.** `/api/workers` returning `source:"supabase"` proves the deployed service can read Supabase. The new *real* check (`checkSupabaseHealth`) is verified only with an injected fake client in tests and locally (where no service key is present). |
 | CORS | **Verified (old build).** `OPTIONS /api/health` with `Origin: https://ostra-studio-web.vercel.app` → `204` + `access-control-allow-origin: https://ostra-studio-web.vercel.app`. |
-| Kaggle (`bettertrade/notebook7eae283a4a`) live push | **Not attempted / unavailable** — no `KAGGLE_API_TOKEN` in this workspace, and Render env cannot be read from here. No live run was observed. |
-| Kaggle worker registration + heartbeat → ONLINE | **Not verified** — no live worker has registered. |
+| Kaggle (`bettertrade/notebook7eae283a4a`) live push | **Verified live.** A real push was executed with the workspace `KAGGLE_API_TOKEN` and Kaggle accepted it: `versionNumber=7`, `url=https://www.kaggle.com/code/bettertrade/notebook7eae283a4a`, `initial_state=requested` (never ONLINE). A follow-up read shows `currentVersionNumber=7`. See §13. |
+| Kaggle worker registration + heartbeat → ONLINE | **Not yet observed** — the notebook now carries the register + heartbeat bootstrap (v8) and Render is on the new build, but `GET /api/workers` still returns `"workers":[]`. Pending the v8 boot and matching `WORKER_REGISTRATION_TOKEN` secrets. |
 | Colab Image / Voice | **Not attempted** — no Colab project/token/bootstrap configured; stays `NOT_CONFIGURED` by design. |
 | Vercel frontend | **Not verified** — the Vercel project is external; `NEXT_PUBLIC_API_URL` cannot be inspected or set from this workspace. |
 
@@ -226,8 +226,10 @@ No secret values appear in this document or in source.
 
 **Recommended task:** verify the live chain end-to-end after Render + Vercel redeploy `main`.
 
-Prerequisites: (1) Render has redeployed `main`; (2) `KAGGLE_API_TOKEN` + `KAGGLE_KERNEL_REF` are set on
-Render; (3) `NEXT_PUBLIC_API_URL` is set in Vercel Production.
+Prerequisites: (1) ~~Render has redeployed `main`~~ **done** — verified serving the new envelope this
+session; (2) ~~`KAGGLE_API_TOKEN` + `KAGGLE_KERNEL_REF` are set on Render~~ **done** — `script` is
+`configured`; (3) `NEXT_PUBLIC_API_URL` is set in Vercel Production (still unverified from here);
+(4) the Kaggle secret `WORKER_REGISTRATION_TOKEN` matches Render's, so the notebook bootstrap can register.
 
 Steps: `curl https://ostra-studio-1.onrender.com/api/health` and confirm the new envelope
 (`timestamp`, `supabase` object, 7-state providers — no `Set KAGGLE_SCRIPT_URL`); `curl /api/workers` and
@@ -249,15 +251,16 @@ after** the heartbeat arrives and to `OFFLINE` with "heartbeat expired" after th
 
 ## 12. Verification
 
-- Verified locally: 136 tests, both typechecks, `next build`, the tsx smoke import, and the CORS/health
-  behaviour of the **old** live build.
-- Verified against the live Kaggle API (read-only, real token): auth accepted, `bettertrade/notebook7eae283a4a`
-  read successfully (`currentVersionNumber=6`, source 20194 chars). See §13.
+- Verified locally: 141 tests, both typechecks, `next build`, the tsx smoke import, `bun run lint` (new ESLint
+  config), and the live CORS/health behaviour of the **new** deployed build.
+- Verified against the live Kaggle API with a real token: auth accepted; `bettertrade/notebook7eae283a4a` read
+  (`currentVersionNumber=7`, source 20194 chars); a **real push** accepted (`versionNumber=7`); the notebook
+  bootstrap synced and pushed (`versionNumber=8`). See §13.
 - **Unverified / not attempted:** the live Render deployment of this code (deploy pending), the live Vercel
-  deployment, `NEXT_PUBLIC_API_URL` on Vercel, a real Kaggle **push** (a run was deliberately not started),
-  a real worker registration/heartbeat/ONLINE→OFFLINE transition, and the Colab Image/Voice runtimes.
+  deployment, `NEXT_PUBLIC_API_URL` on Vercel, a real worker registration/heartbeat/ONLINE→OFFLINE transition,
+  and the Colab Image/Voice runtimes. (The real Kaggle push *was* executed — see §13.)
 - **The Script AI worker has NOT been observed ONLINE.** Do not report it as online until the heartbeat is
-  actually seen. `bun --filter @ostra/web lint` could not be run (no ESLint config committed).
+  actually seen. (`bun --filter @ostra/web lint` now runs — `apps/web/.eslintrc.json` was added; see §13b.)
 
 ## 13. Live Kaggle verification (added after §12)
 
@@ -268,11 +271,32 @@ Kaggle path was exercised for real via the new `bun run verify:kaggle`
 **Observed (read-only):** `GET /api/v1/kernels/list?pageSize=1` → 200 (token accepted);
 `GET /api/v1/kernels/pull?user_name=bettertrade&kernel_slug=notebook7eae283a4a` → 200,
 `title=notebook7eae283a4a`, `language=python`, `kernelType=notebook`, `source` 20194 chars,
-`currentVersionNumber=6`, `enableInternet=true enableGpu=true isPrivate=false`. A push would therefore
-produce `provider_run_id=bettertrade/notebook7eae283a4a@v7`.
+`currentVersionNumber=6`, `enableInternet=true enableGpu=true isPrivate=false`.
 
-**Three real bugs found and fixed in `KaggleRuntimeStarter`** — the old code could never start a run even
-with perfect credentials, because it failed its own auth gate first:
+### 13a. The real push was executed
+
+On explicit go-ahead, `bun run verify:kaggle --push --kernel-ref=bettertrade/notebook7eae283a4a` was run
+against the live Kaggle API (workspace `.env` has `KAGGLE_API_TOKEN` but **not** `KAGGLE_KERNEL_REF`, hence
+the explicit `--kernel-ref`; Render still needs `KAGGLE_KERNEL_REF`).
+
+**Observed (real write):** push accepted → `startup_request_id=kaggle:mukuey0q:8o5cxr`,
+`previousVersion=6`, `versionNumber=7`, `url=https://www.kaggle.com/code/bettertrade/notebook7eae283a4a`,
+`enableInternet=true enableGpu=true enableTpu=false isPrivate=false`, `initial_state=requested`. A follow-up
+read-only check reports `currentVersionNumber=7`, so the version really was created on Kaggle (a new run was
+requested; nothing was fabricated, and the state is **not** ONLINE).
+
+**Fourth real bug, exposed only by actually pushing** (all existing tests missed it because they mocked the
+push response): Kaggle's push reply returns `ref` in the **site form `/code/owner/slug`** — verified live:
+`"ref":"/code/bettertrade/notebook7eae283a4a"`. The starter used `ref` verbatim, so the real
+`provider_run_id` came out as `/code/bettertrade/notebook7eae283a4a@v7`, a form that matches nothing else in
+the system (leases, `runtime_startup_history`, provider health and worker registration all key on
+`owner/slug`). Fixed by a new exported `canonicalizeKernelRef()` that strips the leading `/` and the `code/`
+segment (falling back to the resolved `owner/slug`, never inventing a value); `provider_response` now keeps
+the raw value as `providerRef` for the audit trail. Regression test mocks the exact live payload
+(`ref:"/code/bettertrade/notebook7eae283a4a"`) and asserts `provider_run_id === "bettertrade/notebook7eae283a4a@v7"`.
+
+**Three further real bugs found and fixed in `KaggleRuntimeStarter`** — the old code could never start a run
+even with perfect credentials, because it failed its own auth gate first:
 
 1. `GET /api/v1/kernels/list?mine=true&pageSize=1` → **HTTP 400 `Invalid field 'mine'`**. `mine` is not a
    Kaggle API field. Now `?pageSize=1`; owner-scoped searches use `group=profile`.
@@ -291,6 +315,37 @@ cells contain **no call to `POST /api/workers/register` and no heartbeat loop**.
 worker with `WORKER_REGISTRATION_TOKEN`, `GET /api/workers` will stay empty and Script AI can never be
 `ONLINE` — it will correctly sit at `STARTING` and then `OFFLINE` with a stale-heartbeat reason.
 
-**Not done on purpose:** no `--push` was issued, so no Kaggle run/quota was consumed and no new public
-kernel version was created. `bun run verify:kaggle --push` is the one-command next step and needs explicit
-go-ahead.
+**Re-running a push** creates another public kernel version and consumes quota; `bun run verify:kaggle`
+(no flags) is the free read-only check and is enough to confirm credentials and current state.
+
+### 13b. The notebook bootstrap (the ONLINE blocker) + Render redeploy
+
+**Root cause of "never ONLINE":** the kernel started Qwen + FastAPI + an ngrok tunnel, but contained **no
+`POST /api/workers/register` and no heartbeat loop** — nothing ever told the backend the runtime existed.
+
+**Fixed by owning the cell in the repo.** New canonical cell `scripts/kaggle-worker-bootstrap.py` (managed
+marker `# ── Ostra Studio worker bootstrap (managed cell) ──`) reads two Kaggle secrets
+(`WORKER_REGISTRATION_TOKEN` required, `OSTRA_API_URL` optional, default `https://ostra-studio-1.onrender.com`),
+registers with `endpoint = PUBLIC_URL` from the notebook's own ngrok tunnel, then heartbeats every 30s
+(under `WORKER_HEARTBEAT_TIMEOUT_SEC=90`); a 404 heartbeat re-registers. With no token it prints
+`NOT REGISTERED` and starts **no** heartbeat — it cannot fabricate ONLINE. New tool `bun run sync:notebook`
+(`scripts/kaggle-sync-notebook.ts`): `--dump [--dump-full]` reads the live cells, default is a dry run, and
+`--apply` pushes a **real** new version; the sync is idempotent (a re-run reports `ALREADY IN SYNC`).
+
+**Executed for real:** appended the cell as index 15 and pushed → `versionNumber=8` (from 7),
+`url=https://www.kaggle.com/code/bettertrade/notebook7eae283a4a`. A follow-up read confirms the live notebook
+now has 16 cells with the managed bootstrap present and in sync.
+
+**Render is now on the new build** (verified this session, previously "deploy pending"): `GET /health`
+returns the unified envelope with `supabase.status=ONLINE` (`reason: connected via SUPABASE_URL`,
+`latencyMs=1403`) and `providers.script.health={status:"OFFLINE", reason:"configured but runtime is not
+running — use Run Now or wait for the schedule", detail:{kernelRef:"bettertrade/notebook7eae283a4a"}}`.
+So `KAGGLE_API_TOKEN` + `KAGGLE_KERNEL_REF` **are** set on Render and the Script provider is *configured*,
+reporting a truthful OFFLINE — not `NOT_CONFIGURED`. `GET /api/workers` still returns
+`{"workers":[],"source":"supabase"}`: nothing has registered yet, which is the correct state until the v8
+run finishes booting and its bootstrap cell reaches the API with a matching `WORKER_REGISTRATION_TOKEN`.
+
+**Still required from the operator** (cannot be set from this workspace): the Kaggle secret
+`WORKER_REGISTRATION_TOKEN` on the notebook's account, matching `WORKER_REGISTRATION_TOKEN` on Render;
+`KAGGLE_EXEC_DISABLED=false`; and the Colab secrets for Image/Voice. If the secrets are absent the
+bootstrap cell will print `NOT REGISTERED` and Script AI will correctly stay OFFLINE.

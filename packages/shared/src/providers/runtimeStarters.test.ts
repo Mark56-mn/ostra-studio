@@ -3,6 +3,7 @@ import assert from "node:assert";
 import { describe, it, afterEach } from "node:test";
 import {
   redactSecrets,
+  canonicalizeKernelRef,
   ColabImageRuntimeStarter,
   ColabVoiceRuntimeStarter,
   KaggleRuntimeStarter,
@@ -33,6 +34,27 @@ afterEach(() => {
 });
 
 describe("runtimeStarters", () => {
+  // ── canonicalizeKernelRef ───────────────────────────────────────
+  // Kaggle returns refs in the site form ("/code/owner/slug"); our canonical id is "owner/slug".
+  it("canonicalizeKernelRef strips the live site form /code/ segment", () => {
+    assert.equal(canonicalizeKernelRef("/code/bettertrade/notebook7eae283a4a", "bettertrade", "notebook7eae283a4a"), "bettertrade/notebook7eae283a4a");
+  });
+  it("canonicalizeKernelRef leaves an already-canonical ref untouched", () => {
+    assert.equal(canonicalizeKernelRef("owner/slug", "owner", "slug"), "owner/slug");
+  });
+  it("canonicalizeKernelRef strips a bare code/ prefix and leading slashes", () => {
+    assert.equal(canonicalizeKernelRef("code/owner/slug", "owner", "slug"), "owner/slug");
+    assert.equal(canonicalizeKernelRef("//owner/slug", "owner", "slug"), "owner/slug");
+  });
+  it("canonicalizeKernelRef falls back to the resolved ref and never invents", () => {
+    assert.equal(canonicalizeKernelRef(null, "owner", "slug"), "owner/slug");
+    assert.equal(canonicalizeKernelRef("", "owner", "slug"), "owner/slug");
+    // slug-only with no known owner stays slug-only rather than guessing
+    assert.equal(canonicalizeKernelRef(null, null, "slug"), "slug");
+    // slug-only reply + known owner becomes owner/slug
+    assert.equal(canonicalizeKernelRef("notebook7eae283a4a", "bettertrade", "notebook7eae283a4a"), "bettertrade/notebook7eae283a4a");
+  });
+
   // ── redactSecrets ───────────────────────────────────────────────
   it("redactSecrets hides tokens", () => {
     const r = redactSecrets({ KAGGLE_API_TOKEN: "secret123", kernelRef: "keep" });
@@ -356,6 +378,48 @@ describe("runtimeStarters", () => {
       assert.equal(r.ok, true);
       if (r.ok) {
         assert.equal(r.provider_run_id, "testuser2/notebook7eae283a4a@v2");
+      }
+    } finally {
+      restoreEnv([...envKeys]);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("Kaggle push canonicalizes the real site-form ref (/code/owner/slug) into owner/slug@vN", async () => {
+    // Regression: the LIVE Kaggle push API returns ref="/code/bettertrade/notebook7eae283a4a".
+    // Committing that verbatim would make provider_run_id a form that never matches leases,
+    // history, provider health or worker registration (all of which use owner/slug).
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_KERNEL_REF", "KAGGLE_EXEC_DISABLED"] as const;
+    saveEnv([...envKeys]);
+    const token = "bettertrade:bettertrade-key-for-test";
+    const kernelRef = "bettertrade/notebook7eae283a4a";
+    process.env.KAGGLE_API_TOKEN = token;
+    process.env.KAGGLE_KERNEL_REF = kernelRef;
+    delete process.env.KAGGLE_EXEC_DISABLED;
+    const s = new KaggleRuntimeStarter({ apiToken: token, kernelRef });
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/v1/kernels/list?pageSize=1")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/api/v1/kernels/pull") && (init?.method ?? "GET") !== "POST") {
+        return new Response(JSON.stringify({ blob: { source: "print('hello')", language: "python", kernelType: "notebook" }, metadata: { currentVersionNumber: 6, enableInternet: true, enableGpu: true, isPrivate: false } }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/api/v1/kernels/push")) {
+        // Exactly what the live API returned on 2026-09-28 — leading /code/ segment included.
+        return new Response(JSON.stringify({ ref: "/code/bettertrade/notebook7eae283a4a", versionNumber: 7, url: "https://www.kaggle.com/code/bettertrade/notebook7eae283a4a" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response("not mocked", { status: 500 });
+    };
+    try {
+      const r = await s.start({ worker_type: "script", runtime: "kaggle", provider: "kaggle", trigger_source: "kaggle-live-check", config: {} });
+      assert.equal(r.ok, true);
+      if (r.ok) {
+        assert.equal(r.provider_run_id, "bettertrade/notebook7eae283a4a@v7", `provider_run_id must be canonical owner/slug@vN, got ${r.provider_run_id}`);
+        assert.ok(!r.provider_run_id!.startsWith("/"), "provider_run_id must not start with a site-form slash");
+        assert.ok(!r.provider_run_id!.includes("/code/"), "provider_run_id must not contain the /code/ site segment");
+        assert.equal(r.provider_response["providerRef"], "/code/bettertrade/notebook7eae283a4a", "raw Kaggle ref is still recorded for the audit trail");
+        assert.equal(r.initial_state, "requested", "initial_state must be requested, not ONLINE");
       }
     } finally {
       restoreEnv([...envKeys]);
