@@ -19,10 +19,11 @@ export function Badge({ variant = "muted", children, dot }: { variant?: Variant;
 }
 
 export function statusVariant(s: string): Variant {
-  const t = s.toUpperCase();
+  const t = (s ?? "UNKNOWN").toUpperCase();
   if (["ONLINE","COMPLETED","APPROVED","PUBLISHED","IDLE"].includes(t)) return "online";
-  if (["OFFLINE","FAILED","REJECTED","CANCELLED"].includes(t)) return "offline";
-  if (["WORKING","QUEUED","RETRYING","WAITING","RENDERING","UPLOADING","QC","REVIEW"].includes(t)) return "working";
-  if (["CONNECTING","PENDING","WAITING","CHANGES_REQUESTED"].includes(t)) return "warn";
+  if (["OFFLINE","FAILED","REJECTED","CANCELLED","ERROR"].includes(t)) return "offline";
+  if (["WORKING","QUEUED","RETRYING","RENDERING","UPLOADING","QC","REVIEW"].includes(t)) return "working";
+  if (["CONNECTING","PENDING","WAITING","STARTING","DEGRADED","CHANGES_REQUESTED"].includes(t)) return "warn";
+  if (["NOT_CONFIGURED"].includes(t)) return "warn";
   return "muted";
 }

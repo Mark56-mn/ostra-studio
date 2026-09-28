@@ -3,6 +3,7 @@
 export * from "./domain/schemas";
 export * from "./domain/schedules";
 export * from "./providers/contracts";
+export * from "./providers/health";
 export * from "./providers/registry";
 export * from "./providers/runtimeStarters";
 export { EVT, eventPayload } from "./orchestrator/events";
@@ -16,4 +17,5 @@ export {
 export type { WorkerStatus, TaskStatus } from "./orchestrator/state";
 export * from "./lib/supabase";
 export * from "./lib/env";
+export * from "./lib/cors";
 export * from "./lib/cn";

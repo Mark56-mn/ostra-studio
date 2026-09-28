@@ -1,25 +1,27 @@
 // Provider registry
-// Resolves adapters from environment. If an env var is absent, that provider is OFFLINE — not mocked.
-// Replace KAGGLE_* / COLAB_* / KOKORO_* env vars to go ONLINE without changing any workflow code.
+// Resolves provider adapters. Status is derived from REAL configuration/credentials and, for
+// storage, from a real Supabase query — never from a hand-maintained URL that must be kept alive.
+//
+// The runtime supervisor (apps/api) enriches these config-level statuses with live worker
+// heartbeat + startup-attempt truth (see apps/api/src/lib/providerHealth.ts).
+//
+// ONLINE is never produced here: configuration presence alone is NOT health.
 
-import type { ProviderRegistry } from "./contracts";
-import { offlineHealth, offlineResult } from "./contracts";
+import type { ProviderRegistry, ProviderHealth } from "./contracts";
+import { offlineResult } from "./contracts";
+import { makeHealth } from "./health";
+import { checkSupabaseHealth } from "../lib/supabase";
+import { colabConfig, kaggleConfig } from "../lib/env";
 
 type Adapter = ProviderRegistry[keyof ProviderRegistry];
 
-function makeOfflineAdapter(id: string, providerName: string, reason: string): Adapter {
-  const health = async () => offlineHealth(reason);
-  // Each adapter shares the same offline shape; extra methods just return OFFLINE results.
+function makeTaskStubs(reason: string) {
+  // Task execution is not wired for these adapters yet; they must never claim success.
   return {
-    id: id as never,
-    providerName,
-    health,
-    // Script
     developStory: async () => offlineResult(reason),
     writeScript: async () => offlineResult(reason),
     breakdownScenes: async () => offlineResult(reason),
     narration: async () => offlineResult(reason),
-    // Image / voice / video / storage / youtube shared fallbacks
     generate: async () => offlineResult(reason),
     thumbnail: async () => offlineResult(reason),
     synthesize: async () => offlineResult(reason),
@@ -27,68 +29,79 @@ function makeOfflineAdapter(id: string, providerName: string, reason: string): A
     render: async () => offlineResult(reason),
     upload: async () => offlineResult(reason),
     signUrl: async () => null,
-  } as unknown as Adapter;
+  };
 }
 
-// Concrete HTTP adapters live here once credentials exist. For now they probe the configured URL
-// and report real health — no fake COMPLETED states.
-function makeHttpProbingAdapter(
+/** Adapter whose health is a fixed, truthful status derived from configuration. */
+function makeConfiguredAdapter(
   id: string,
   providerName: string,
-  baseUrl: string | undefined,
-  extraReason: string
+  status: ProviderHealth["status"],
+  reason: string
 ): Adapter {
-  if (!baseUrl) return makeOfflineAdapter(id, providerName, extraReason);
-  const health = async () => {
-    const start = Date.now();
-    try {
-      const r = await fetch(baseUrl, { method: "GET", signal: AbortSignal.timeout(4000) });
-      const latencyMs = Date.now() - start;
-      if (r.ok) return { ok: true, status: "ONLINE" as const, latencyMs, checkedAt: new Date().toISOString() };
-      return { ok: false, status: "DEGRADED" as const, latencyMs, reason: `HTTP ${r.status}`, checkedAt: new Date().toISOString() };
-    } catch (e) {
-      return { ok: false, status: "OFFLINE" as const, reason: e instanceof Error ? e.message : String(e), checkedAt: new Date().toISOString() };
-    }
-  };
-  // Task execution for HTTP adapters is intentionally not implemented in Phase 0/1.
-  // They report health truthfully; task submission lands in Phase 4-6 and will POST to the worker URL.
   return {
     id: id as never,
     providerName,
-    health,
-    developStory: async () => offlineResult("Script task execution not yet wired — worker is reachable, adapter pending (Phase 4)"),
-    writeScript: async () => offlineResult("Script task execution not yet wired — Phase 4"),
-    breakdownScenes: async () => offlineResult("Script task execution not yet wired — Phase 4"),
-    narration: async () => offlineResult("Script task execution not yet wired — Phase 4"),
-    generate: async () => offlineResult("Image generation not yet wired — Phase 5"),
-    thumbnail: async () => offlineResult("Image generation not yet wired — Phase 5"),
-    synthesize: async () => offlineResult("Voice synthesis not yet wired — Phase 6"),
-    synthesizeBatch: async () => offlineResult("Voice synthesis not yet wired — Phase 6"),
-    render: async () => offlineResult("Video rendering not yet wired — Phase 7"),
-    upload: async () => offlineResult("Storage adapter pending env"),
-    signUrl: async () => null,
+    health: async () => makeHealth(status, { provider: providerName, reason }),
+    ...makeTaskStubs(reason),
   } as unknown as Adapter;
 }
 
 export function resolveRegistry(): ProviderRegistry {
-  const kaggleUrl = process.env.KAGGLE_SCRIPT_URL;
-  const imageUrl  = process.env.COLAB_IMAGE_URL;
-  const voiceUrl  = process.env.COLAB_VOICE_URL || process.env.KOKORO_VOICE_URL;
-  const hasSupabase = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL);
+  const kaggle = kaggleConfig();
+  const image = colabConfig("image");
+  const voice = colabConfig("voice");
 
   return {
-    script:  makeHttpProbingAdapter("script",  kaggleUrl ? "kaggle" : "kaggle (unconfigured)", kaggleUrl, "Set KAGGLE_SCRIPT_URL to connect Script AI") as ProviderRegistry["script"],
-    image:   makeHttpProbingAdapter("image",   imageUrl  ? "colab-image" : "colab-image (unconfigured)", imageUrl, "Set COLAB_IMAGE_URL to connect Image AI") as ProviderRegistry["image"],
-    voice:   makeHttpProbingAdapter("voice",   voiceUrl  ? "kokoro-82m" : "kokoro-82m (unconfigured)", voiceUrl, "Set KOKORO_VOICE_URL or COLAB_VOICE_URL to connect Voice AI") as ProviderRegistry["voice"],
-    video:   makeOfflineAdapter("video", "ffmpeg (local)", "Video renderer runs as a local/edge worker — Phase 7") as ProviderRegistry["video"],
-    storage: hasSupabase
-      ? { id: "storage", providerName: "supabase-storage",
-          health: async () => ({ ok: true, status: "ONLINE", checkedAt: new Date().toISOString() }),
-          upload: async () => offlineResult("Storage upload pending Supabase Storage bucket setup"),
-          signUrl: async () => null,
-        } as ProviderRegistry["storage"]
-      : makeOfflineAdapter("storage", "supabase-storage (unconfigured)", "Set NEXT_PUBLIC_SUPABASE_URL + keys") as ProviderRegistry["storage"],
-    youtube: makeOfflineAdapter("youtube", "youtube-api (unconfigured)", "YouTube OAuth not configured — Phase 9") as ProviderRegistry["youtube"],
+    script: makeConfiguredAdapter(
+      "script",
+      "kaggle",
+      kaggle.configured ? "OFFLINE" : "NOT_CONFIGURED",
+      kaggle.configured
+        ? "Kaggle API configured but the Script runtime has not registered a worker yet"
+        : kaggle.reason ?? "Kaggle is not configured"
+    ) as ProviderRegistry["script"],
+
+    image: makeConfiguredAdapter(
+      "image",
+      "colab-image",
+      image.configured ? "OFFLINE" : "NOT_CONFIGURED",
+      image.configured
+        ? "Colab Image runtime configured but no Image worker has registered yet"
+        : image.reason ?? "Image runtime is not configured"
+    ) as ProviderRegistry["image"],
+
+    voice: makeConfiguredAdapter(
+      "voice",
+      "kokoro-82m",
+      voice.configured ? "OFFLINE" : "NOT_CONFIGURED",
+      voice.configured
+        ? "Colab Voice runtime configured but no Voice worker has registered yet"
+        : voice.reason ?? "Voice runtime is not configured"
+    ) as ProviderRegistry["voice"],
+
+    video: makeConfiguredAdapter(
+      "video",
+      "ffmpeg",
+      "NOT_CONFIGURED",
+      "Video renderer runs as a local/edge worker — not deployed yet"
+    ) as ProviderRegistry["video"],
+
+    storage: {
+      id: "storage",
+      providerName: "supabase-storage",
+      // Real, lightweight check against the configured Supabase — never "configured = ONLINE".
+      health: async () => ({ ...(await checkSupabaseHealth()), provider: "supabase-storage" }),
+      upload: async () => offlineResult("Storage upload pending Supabase Storage bucket setup"),
+      signUrl: async () => null,
+    } as ProviderRegistry["storage"],
+
+    youtube: makeConfiguredAdapter(
+      "youtube",
+      "youtube-api",
+      "NOT_CONFIGURED",
+      "YouTube OAuth is not configured"
+    ) as ProviderRegistry["youtube"],
   };
 }
 

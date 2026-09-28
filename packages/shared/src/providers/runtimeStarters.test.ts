@@ -363,6 +363,58 @@ describe("runtimeStarters", () => {
     }
   });
 
+  it("Kaggle bettertrade/notebook7eae283a4a real push returns real provider_run_id @vN with no synthetic", async () => {
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_KERNEL_REF", "KAGGLE_EXEC_DISABLED"] as const;
+    saveEnv([...envKeys]);
+    // Exact verified notebook for §38 — owner/slug form must bypass legacy resolution and push truly
+    const token = "bettertrade:bettertrade-key-for-test";
+    const kernelRef = "bettertrade/notebook7eae283a4a";
+    process.env.KAGGLE_API_TOKEN = token;
+    process.env.KAGGLE_KERNEL_REF = kernelRef;
+    delete process.env.KAGGLE_EXEC_DISABLED;
+    const s = new KaggleRuntimeStarter({ apiToken: token, kernelRef });
+    const calls: string[] = [];
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      // resolveKaggleKernelRef with slash returns immediately — no search fetch expected
+      if (url.includes("/api/v1/kernels/list?mine=true&pageSize=1")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/api/v1/kernels/bettertrade/notebook7eae283a4a") && (init?.method ?? "GET") !== "POST") {
+        return new Response(JSON.stringify({ blob: { source: "print('hello bettertrade qwen')", language: "python", kernelType: "notebook", title: "notebook7eae283a4a", isPrivate: true, enableInternet: true } }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/api/v1/kernels/push")) {
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        // push must use owner/slug exactly and carry real text — never synthetic
+        assert.equal(body["slug"], "bettertrade/notebook7eae283a4a");
+        assert.ok(typeof body["text"] === "string" && (body["text"] as string).length > 0, "push text must be real kernel source");
+        return new Response(JSON.stringify({ ref: "bettertrade/notebook7eae283a4a", versionNumber: 7, url: "https://www.kaggle.com/code/bettertrade/notebook7eae283a4a" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response("not mocked", { status: 500 });
+    };
+    try {
+      const r = await s.start({ worker_type: "script", runtime: "kaggle", provider: "kaggle", trigger_source: "scheduler:bettertrade-test", config: {} });
+      assert.equal(r.ok, true);
+      if (r.ok) {
+        assert.ok(r.startup_request_id.startsWith("kaggle:"), `startup_request_id should be kaggle: got ${r.startup_request_id}`);
+        assert.equal(r.provider_run_id, "bettertrade/notebook7eae283a4a@v7", `provider_run_id must be ref@vN for bettertrade, got ${r.provider_run_id}`);
+        assert.ok(!r.provider_run_id!.startsWith("kaggle:"), "provider_run_id must not be synthetic kaggle:");
+        assert.ok(r.provider_run_id!.includes("@v"), "provider_run_id must contain @v");
+        assert.notEqual(r.provider_run_id, r.startup_request_id, "provider_run_id must not equal startup_request_id");
+        assert.equal(r.initial_state, "requested", "initial_state must be requested, not ONLINE");
+        assert.ok(r.provider_response, "provider_response present");
+        // ensure no legacy search was triggered (has slash)
+        assert.ok(!calls.some(c => c.includes("search=notebook7eae283a4a") && c.includes("pageSize=100")), "bettertrade/notebook7eae283a4a with slash should not trigger legacy search");
+        assert.ok(calls.some(c => c.includes("/kernels/bettertrade/notebook7eae283a4a")));
+        assert.ok(calls.some(c => c.includes("/kernels/push")));
+      }
+    } finally {
+      restoreEnv([...envKeys]);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   // ── Colab: truthful autostartable but checked at start time ──────
   it("Colab starters are autostartable=true (scheduler may attempt, start returns truthful code)", async () => {
     const sImg = new ColabImageRuntimeStarter();

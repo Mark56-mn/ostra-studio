@@ -307,7 +307,8 @@ export async function runNow(supa: SupabaseClient, scheduleId: string): Promise<
 
 // Run Now by (worker_type, runtime) when the user doesn't have a schedule yet (ad-hoc).
 export async function runNowByWorker(supa: SupabaseClient, worker_type: string, runtime: string, provider: string): Promise<{ action: string; historyId?: string; error?: string }> {
-  const fake: Record<string, unknown> = {
+  // Ephemeral config for an ad-hoc run (no persisted schedule row) — never persisted as a fake schedule.
+  const adHocConfig: Record<string, unknown> = {
     id: `run_now:${worker_type}:${runtime}`,
     worker_type, runtime, provider,
     startup_mode: runtime === "kaggle" ? "kaggle_kernel" : runtime === "colab" ? "colab_notebook" : "not_autostartable",
@@ -358,15 +359,15 @@ export async function runNowByWorker(supa: SupabaseClient, worker_type: string, 
     });
     return { action: "not_autostartable", historyId: h?.id as string | undefined };
   }
-  const fakeRequestId = `req:${Date.now().toString(36)}:${Math.random().toString(36).slice(2,7)}`;
-  const outcome = await effectiveStarter.start({ worker_type, runtime, provider, trigger_source: "run_now", config: fake });
+  const preRequestId = `req:${Date.now().toString(36)}:${Math.random().toString(36).slice(2,7)}`;
+  const outcome = await effectiveStarter.start({ worker_type, runtime, provider, trigger_source: "run_now", config: adHocConfig });
   if (!outcome.ok) {
     const code = outcome.code ?? "UNKNOWN";
     const result: string = code === "NOT_AUTOSTARTABLE" ? "not_autostartable" : "failed";
     const status = code === "NOT_AUTOSTARTABLE" ? "CANCELLED" : "FAILED";
     const h = await insertHistory(supa, {
       schedule_id: null, worker_type, runtime, provider,
-      trigger_source: "run_now", startup_request_id: fakeRequestId,
+      trigger_source: "run_now", startup_request_id: preRequestId,
       provider_run_id: null, provider_response: redactSecrets(outcome.provider_response) as Record<string,unknown>,
       result: result as never, status: status as never, error: outcome.error, error_code: code,
     });
@@ -374,7 +375,7 @@ export async function runNowByWorker(supa: SupabaseClient, worker_type: string, 
     await relLease(supa, leaseId);
     return { action: result, historyId: h?.id as string | undefined, error: outcome.error };
   }
-  const realId = outcome.startup_request_id ?? fakeRequestId;
+  const realId = outcome.startup_request_id ?? preRequestId;
   const h = await insertHistory(supa, {
     schedule_id: null, worker_type, runtime, provider,
     trigger_source: "run_now", startup_request_id: realId,

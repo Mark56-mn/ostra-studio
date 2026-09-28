@@ -12,9 +12,10 @@ SUPABASE_SERVICE_ROLE_KEY=eyJ...
 # optional fallback:
 SUPABASE_ANON_KEY=
 
-# CORS — comma-separated origins allowed to call the API
-# In production set to your Vercel domains:
-CORS_ORIGINS=https://your-site.vercel.app,https://your-site-preview.vercel.app
+# CORS — EXTRA origins allowed to call the API (comma-separated).
+# https://ostra-studio-web.vercel.app, *.vercel.app previews and http(s)://localhost:* are ALWAYS allowed.
+# `*` is never used (worker register/heartbeat are token-protected).
+CORS_ORIGINS=https://ostra-studio-web.vercel.app
 
 # --- Runtime Supervisor ---
 SCHEDULER_ENABLED=true
@@ -25,9 +26,9 @@ WORKER_REGISTRATION_SECRET=...           # alias for WORKER_REGISTRATION_TOKEN (
 WORKER_HEARTBEAT_TIMEOUT_SEC=90
 
 # Kaggle Script AI — real execution via POST /api/v1/kernels/push (ApiSaveKernelRequest)
-KAGGLE_SCRIPT_URL=https://...
+# NO KAGGLE_SCRIPT_URL: the supervisor pushes the kernel and waits for worker registration + heartbeat.
 KAGGLE_API_TOKEN=...            # server-only, JSON {username,key} or username:key or KGAT_* Bearer, redacted
-KAGGLE_KERNEL_REF=...           # e.g. mark56/studio-script-kernel or legacy notebook7eae283a4a (resolved to owner/slug)
+KAGGLE_KERNEL_REF=bettertrade/notebook7eae283a4a  # REQUIRED exact notebook ref (owner/slug)
 KAGGLE_EXEC_DISABLED=false      # true => probe-only, no push
 
 # Colab Image / Voice — real auto-start via POST https://colaboratory.googleapis.com/v1beta/runtimes
@@ -40,10 +41,9 @@ COLAB_VOICE_BOOTSTRAP_URL=...    # alias: COLAB_BOOTSTRAP_URL — same for Voice
 COLAB_RUNTIME_SPEC=...           # optional spec id (validated via GET /v1beta/runtimespecs eligible)
 COLAB_RUNTIME_ID=...             # optional runtimeId for POST ?runtimeId=…
 
-# Legacy health probes (probe-only, no auto-start)
-COLAB_IMAGE_URL=https://...
-COLAB_VOICE_URL=https://...
-KOKORO_VOICE_URL=https://...
+# REMOVED: COLAB_IMAGE_URL / COLAB_VOICE_URL / KOKORO_VOICE_URL / KAGGLE_SCRIPT_URL
+# are no longer read anywhere. Image/Voice state comes from the real Colab runtime + worker
+# registration; Script state comes from the Kaggle push lifecycle. Stale values are ignored.
 
 # YouTube OAuth (Phase 9)
 YOUTUBE_CLIENT_ID=
@@ -57,7 +57,7 @@ PORT=3001
 
 ### Kaggle auto-start (real, not probe-only) — `KaggleRuntimeStarter`
 
-`POST /api/v1/kernels/push` via `ApiSaveKernelRequest{ slug, newTitle, text, language, kernelType, isPrivate, enableInternet, enableGpu/Tpu, … }` → `ApiSaveKernelResponse{ versionNumber, url, ref }` → `provider_run_id = ref@vN`. `notebook7eae283a4a` resolved by `resolveKaggleKernelRef()` via `GET /api/v1/kernels/list?mine=true&search=`.
+`POST /api/v1/kernels/push` via `ApiSaveKernelRequest{ slug, newTitle, text, language, kernelType, isPrivate, enableInternet, enableGpu/Tpu, … }` → `ApiSaveKernelResponse{ versionNumber, url, ref }` → `provider_run_id = ref@vN` (`bettertrade/notebook7eae283a4a@vN`). Bare `notebook7eae283a4a` is also supported via `resolveKaggleKernelRef()` → `GET /api/v1/kernels/list?mine=true&search=`; `bettertrade/notebook7eae283a4a` with slash bypasses that search.
 
 ### Colab auto-start (real API, truthful when not allowlisted) — `ColabImageRuntimeStarter` / `ColabVoiceRuntimeStarter`
 
@@ -69,6 +69,42 @@ Supabase migrations (run once, idempotent, in order):
 - `supabase/migrations/003_runtime_supervisor_extensions.sql`
 
 Storage bucket: `ostra-assets`
+
+## Health contract
+
+`GET /health` and `GET /api/health` return the identical envelope; `GET /api/providers` returns the same
+object so the dashboard has one parser:
+
+```jsonc
+{
+  "ok": false,                // true only when Supabase is ONLINE and no provider is in ERROR
+  "status": "DEGRADED",       // ONLINE | DEGRADED | ERROR  (the backend itself)
+  "app": "ostra-api",
+  "host": "render",
+  "autoPublish": false,
+  "supabase": { "ok": true, "status": "ONLINE", "provider": "supabase", "latencyMs": 41, "reason": "connected via SUPABASE_URL", "checkedAt": "…" },
+  "providers": {
+    "script":  { "id": "script",  "provider": "kaggle",       "runtime": "kaggle", "health": { "ok": false, "status": "NOT_CONFIGURED", "reason": "Set KAGGLE_API_TOKEN and KAGGLE_KERNEL_REF on Render", "checkedAt": "…" } },
+    "image":   { "id": "image",   "provider": "colab-image",  "runtime": "colab",  "health": { … } },
+    "voice":   { "id": "voice",   "provider": "kokoro-82m",   "runtime": "colab",  "health": { … } },
+    "video":   { "id": "video",   "provider": "ffmpeg",       "runtime": "local",  "health": { … } },
+    "youtube": { "id": "youtube", "provider": "youtube-api",  "runtime": "api",    "health": { … } },
+    "storage": { "id": "storage", "provider": "supabase-storage", "runtime": "supabase", "health": { … } }
+  },
+  "timestamp": "2026-09-28T04:20:00.000Z",
+  "at": "2026-09-28T04:20:00.000Z"   // deprecated alias of timestamp
+}
+```
+
+Derivation (see `packages/shared/src/providers/health.ts`):
+fresh worker heartbeat → `ONLINE`; in-flight startup (< 20 min) with no worker → `STARTING`; existing but
+stale/failed worker → `OFFLINE`/`ERROR`; missing credentials → `NOT_CONFIGURED`; failed/timed-out last attempt
+→ `ERROR`; configured and idle → `OFFLINE`. Provider checks are bounded and isolated — one dead provider never
+suppresses the rest.
+
+`GET /api/workers` returns `{ workers: [...], source: "supabase", timestamp }` where each row carries a
+derived `health` (`workerDisplayHealth`) so the dashboard cannot show a stale row as ONLINE. When Supabase is
+not configured it returns `503` with `error` + `reason` (never a fake offline worker list).
 
 New tables (002+003):
 - `runtime_schedules` — persisted schedules (local_time + timezone + days_of_week + startup_mode + cooldown + max_attempts)

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc --noEmit",
-    "start": "node --loader tsx src/index.ts"
+    "start": "node --import tsx src/index.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",

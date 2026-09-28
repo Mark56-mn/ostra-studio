@@ -1,30 +1,31 @@
 import type { Request, Response } from "express";
-import { requireSupabase } from "../lib/supabase.js";
+import { workerDisplayHealth, type WorkerHealthRow } from "@ostra/shared";
+import { getServerSupabase, requireSupabase, supabaseConfigReason } from "../lib/supabase.js";
 
-const OFFLINE_FALLBACK = [
-  { id: "offline-script",  type: "script",  provider: "kaggle",      runtime: "kaggle", status: "OFFLINE", error: "Set KAGGLE_SCRIPT_URL" },
-  { id: "offline-image",   type: "image",   provider: "colab-image", runtime: "colab",  status: "OFFLINE", error: "Set COLAB_IMAGE_URL" },
-  { id: "offline-voice",   type: "voice",   provider: "kokoro-82m",  runtime: "colab",  status: "OFFLINE", error: "Set KOKORO_VOICE_URL" },
-  { id: "offline-video",   type: "video",   provider: "ffmpeg",      runtime: "local",  status: "OFFLINE", error: "Phase 7 — FFmpeg adapter not yet deployed (replaceable)" },
-  { id: "offline-youtube", type: "youtube", provider: "youtube-api", runtime: "api",    status: "OFFLINE", error: "Phase 9 — YouTube OAuth not configured" },
-];
-
+// GET /api/workers — the real worker registry, with status derived from heartbeat freshness.
+// There is NO synthetic fallback list: if the backend cannot read Supabase it says so explicitly
+// (503 + reason) so the dashboard can tell "backend unreachable" from "no workers registered".
 export async function listWorkers(_req: Request, res: Response) {
-  const supa = requireSupabase(res as unknown as Response);
-  // When Supabase is not configured, return truthful offline fallback — do not fake ONLINE
-  // We check inside without sending 503 so the dashboard still renders a useful empty state
-  const { getServerSupabase } = await import("../lib/supabase.js");
   const c = getServerSupabase();
   if (!c) {
-    return res.json({
-      workers: OFFLINE_FALLBACK,
-      source: "offline-fallback",
-      hint: "Configure Supabase on Render (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY) to persist workers; configure KAGGLE/COLAB env vars to go ONLINE.",
+    return res.status(503).json({
+      error: "Supabase not configured",
+      reason: supabaseConfigReason() ?? "Supabase is not configured on the backend",
+      hint: "Set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY on Render, then wait for a worker to register.",
+      workers: [],
     });
   }
   const { data, error } = await c.from("workers").select("*").order("type");
-  if (error) return res.status(500).json({ error: error.message });
-  res.json({ workers: data ?? [], source: "supabase" });
+  if (error) {
+    return res.status(500).json({ error: error.message, workers: [] });
+  }
+  // Layer the real health on top of the raw row (heartbeat freshness), so the dashboard never has
+  // to re-implement the rule and a stale row is never presented as ONLINE.
+  const workers = (data ?? []).map((row) => ({
+    ...(row as Record<string, unknown>),
+    health: workerDisplayHealth(row as WorkerHealthRow),
+  }));
+  res.json({ workers, source: "supabase", timestamp: new Date().toISOString() });
 }
 
 export async function createWorker(req: Request, res: Response) {

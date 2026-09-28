@@ -1,39 +1,52 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { Response } from "express";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  checkSupabaseHealth,
+  getServerSupabase as createServerSupabase,
+  isSupabaseConfigured as sharedIsSupabaseConfigured,
+  supabaseConfigReason as sharedSupabaseConfigReason,
+  supabaseServerKey,
+  supabaseServerUrl,
+} from "@ostra/shared";
 
-function getSupabaseUrl(): string | undefined {
-  return (
-    process.env.SUPABASE_URL ??
-    process.env.SUPABASE_CONNECTION_STRING ??
-    process.env.NEXT_PUBLIC_SUPABASE_URL
-  );
+/** Server-side Supabase URL, honoring SUPABASE_URL / SUPABASE_CONNECTION_STRING / NEXT_PUBLIC_SUPABASE_URL. */
+export function getSupabaseUrl(): string | undefined {
+  return supabaseServerUrl();
 }
-function getSupabaseServiceKey(): string | undefined {
-  return (
-    process.env.SUPABASE_SERVICE_ROLE_KEY ??
-    process.env.SUPABASE_ANON_KEY ??
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  );
+
+/** Server-side Supabase key (prefers SUPABASE_SERVICE_ROLE_KEY). Never logged or returned. */
+export function getSupabaseServiceKey(): string | undefined {
+  return supabaseServerKey();
 }
 
 export function getServerSupabase(): SupabaseClient | null {
-  const url = getSupabaseUrl();
-  const key = getSupabaseServiceKey();
-  if (!url || !key) return null;
-  return createClient(url, key, { auth: { persistSession: false } });
+  return createServerSupabase();
 }
 
-export function requireSupabase(res: import("express").Response): SupabaseClient | null {
+export function isSupabaseConfigured(): boolean {
+  return sharedIsSupabaseConfigured();
+}
+
+/** Real, lightweight check — never "configured = healthy". */
+export function checkSupabase(client?: SupabaseClient | null, timeoutMs?: number) {
+  return checkSupabaseHealth(client, timeoutMs);
+}
+
+/** Human-readable, secret-free description of the missing Supabase config (if any). */
+export function supabaseConfigReason(): string | undefined {
+  return sharedSupabaseConfigReason();
+}
+
+export function requireSupabase(res: Response): SupabaseClient | null {
   const c = getServerSupabase();
   if (!c) {
     res.status(503).json({
       error: "Supabase not configured",
-      hint: "Set SUPABASE_URL (or SUPABASE_CONNECTION_STRING / NEXT_PUBLIC_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY on Render. Run supabase/migrations/001_initial.sql in Supabase SQL editor.",
+      reason: sharedSupabaseConfigReason() ?? "Supabase is not configured on the backend",
+      hint:
+        "Set SUPABASE_URL (or SUPABASE_CONNECTION_STRING / NEXT_PUBLIC_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY on Render. Run supabase/migrations/001_initial.sql in the Supabase SQL editor.",
     });
     return null;
   }
   return c;
-}
-
-export function isSupabaseConfigured(): boolean {
-  return Boolean(getSupabaseUrl() && getSupabaseServiceKey());
 }

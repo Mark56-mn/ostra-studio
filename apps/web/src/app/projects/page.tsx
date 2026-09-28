@@ -5,7 +5,7 @@ import Link from "next/link";
 import { TopNav } from "@/components/TopNav";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
-import { AgentRoom, OFFLINE_AGENTS, type AgentRow } from "@/components/AgentRoom";
+import { AgentRoom, type AgentRow } from "@/components/AgentRoom";
 import { Pipeline } from "@/components/Pipeline";
 import type { PipelineStep } from "@ostra/shared";
 
@@ -20,7 +20,7 @@ const STATUS_STEP: Record<string, PipelineStep> = {
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
-  const [agents, setAgents] = useState<AgentRow[]>(OFFLINE_AGENTS);
+  const [agents, setAgents] = useState<AgentRow[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -39,13 +39,17 @@ export default function ProjectsPage() {
     if (r.ok) setEpisodes(j.episodes);
   }
   async function loadWorkers() {
-    const r = await fetch(apiUrl("/api/workers")); const j = await r.json();
-    if (j.workers) setAgents(j.workers.map((w: Record<string,unknown>) => ({
+    const r = await fetch(apiUrl("/api/workers")); const j = await r.json().catch(() => null);
+    // No synthetic fallback: workers are shown only when the backend actually returned them.
+    if (Array.isArray(j?.workers)) setAgents(j.workers.map((w: Record<string,unknown>) => ({
       id: String(w["id"]), type: String(w["type"]) as AgentRow["type"],
       provider: String(w["provider"]), model: (w["model"] as string) ?? null,
       runtime: (w["runtime"] as string) ?? null, status: String(w["status"]),
-      lastHeartbeatAt: (w["last_heartbeat_at"] as string) ?? null, error: (w["error"] as string) ?? null,
+      health: (w["health"] as AgentRow["health"]) ?? null,
+      lastHeartbeatAt: (w["last_heartbeat_at"] as string) ?? null,
+      error: (w["error_message"] as string) ?? (w["error"] as string) ?? null,
     })));
+    else setAgents([]);
   }
 
   useEffect(()=>{ loadProjects(); loadWorkers(); }, []);

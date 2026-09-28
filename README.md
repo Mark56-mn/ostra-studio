@@ -9,7 +9,7 @@ The goal is not merely to upload videos. Ostra coordinates a production pipeline
 - **Vercel** → entire website / dashboard / frontend (`apps/web` — Next.js 14, `NEXT_PUBLIC_API_URL` only, no secrets)
 - **Render** → backend API + Orchestrator + Scheduler + Runtime Supervisor (`apps/api` — Express, owns **all** secrets, CORS-locked to Vercel)
 - **Supabase** → Postgres + Storage (shared; migrations `001` + `002` + `003`, bucket `ostra-assets`)
-- **Kaggle** → Script AI (auto-start via real `KaggleRuntimeStarter` → `POST /api/v1/kernels/push` (`ApiSaveKernelRequest`) → exact notebook `notebook7eae283a4a` resolved → `ref@vN` provider_run_id → worker self-registration → health-gated `ONLINE`)
+- **Kaggle** → Script AI (auto-start via real `KaggleRuntimeStarter` → `POST /api/v1/kernels/push` (`ApiSaveKernelRequest`) → exact notebook `bettertrade/notebook7eae283a4a` → `ref@vN` (`bettertrade/notebook7eae283a4a@vN`) provider_run_id → worker self-registration → health-gated `ONLINE`)
 - **Google Colab** → Image AI + Voice AI (adapters present; `Colab*RuntimeStarter` `autostartable=true` but truthful — `POST https://colaboratory.googleapis.com/v1beta/runtimes` → `operations/...` when allowlisted, otherwise `NOT_AUTOSTARTABLE`/`AUTH_FAILED` with bootstrap/allowlist blocker; no fake start)
 - **FFmpeg** → deterministic video renderer, kept **independently replaceable** (never assumed stable on Render Free)
 
@@ -42,7 +42,7 @@ User story/idea
 ## Critical rules
 
 - No mock mode. No fake agents. No fake success states. No fake startup — worker is `ONLINE` only after registration + health pass; `provider_run_id` is the real Kaggle `ref@vN` or Colab `operations/...`, never synthetic `kaggle:startup_request_id`.
-- Real services report their real status (`OFFLINE` when unconfigured — never faked; Kaggle `AUTH_FAILED`/`QUOTA_EXCEEDED`/`RATE_LIMITED`, Colab `NOT_AUTOSTARTABLE` for allowlist/bootstrap missing, `AUTH_FAILED` for token invalid).
+- Real services report their real status using one vocabulary — `ONLINE` / `OFFLINE` / `DEGRADED` / `NOT_CONFIGURED` / `STARTING` / `ERROR` / `UNKNOWN` — with a human-readable reason. Configuration presence is **never** ONLINE. Kaggle `AUTH_FAILED`/`QUOTA_EXCEEDED`/`RATE_LIMITED` and Colab allowlist/bootstrap blockers surface as the real reason.
 - AI providers are adapters and must be replaceable (`packages/shared/src/providers/{contracts,registry,runtimeStarters}.ts`).
 - Kaggle and Colab are initial runtimes, not permanent dependencies. Startup mode is stored per schedule (`kaggle_kernel` / `colab_notebook` / `not_autostartable`), never hard-coded.
 - ElevenLabs is optional, never mandatory. Kokoro-82M is the initial free voice.
@@ -73,7 +73,11 @@ SCHEDULE FIRES → CHECK WORKER HEALTHY? → ALREADY ONLINE → skip (recorded, 
              Schedule edit 09:00→05:00 persists and next run moves immediately (Case F)
 ```
 
-Duplicate protection: healthy check + in-progress lease + per-worker cooldown before any start. Bounded retries via `max_start_attempts` + `cooldown_minutes`. Colab starters are `autostartable=true` (scheduler attempts) but truthfully return `NOT_AUTOSTARTABLE`/`AUTH_FAILED` when project/token/bootstrap/allowlist/spec check fails, or `requested` with real `operations/...` on success. Kaggle push is a real `POST /api/v1/kernels/push` with `text` fetched from `GET /api/v1/kernels/{owner}/{slug}`. **Run Now** (`POST /api/runtime/run-now`) runs the exact same lifecycle as scheduled start.
+Duplicate protection: healthy check + in-progress lease + per-worker cooldown before any start. Bounded retries via `max_start_attempts` + `cooldown_minutes`. Colab starters are `autostartable=true` (scheduler attempts) but truthfully return `NOT_AUTOSTARTABLE`/`AUTH_FAILED` when project/token/bootstrap/allowlist/spec check fails, or `requested` with real `operations/...` on success. Kaggle push is a real `POST /api/v1/kernels/push` with `text` fetched from `GET /api/v1/kernels/{owner}/{slug}` (`bettertrade/notebook7eae283a4a`); **Run Now** (`POST /api/runtime/run-now`) runs the exact same lifecycle as scheduled start. `bun test` runs 134 tests (including the `bettertrade/notebook7eae283a4a@v7` no-synthetic check, the provider-status derivation matrix, the real Supabase health check, CORS origin policy and the frontend API-URL contract).
+
+## Provider status contract (dashboard truth)
+
+The dashboard renders **only** backend state: `GET /api/health` (Render API, Supabase, every provider) and `GET /api/workers`. There are no hard-coded provider labels. `NEXT_PUBLIC_API_URL` missing → `RENDER API · NOT_CONFIGURED`; API unreachable → `BACKEND OFFLINE — Unable to reach Render API`; a configured-but-idle provider → `OFFLINE`/`NOT_CONFIGURED`; a real worker with a fresh heartbeat → `ONLINE`. See `docs/API_ENV.md` for the full response shape.
 
 ## Repository instructions
 
@@ -107,11 +111,12 @@ bun install
 # WORKER_REGISTRATION_TOKEN (or WORKER_REGISTRATION_SECRET), CRON_SECRET,
 # SCHEDULER_ENABLED, KAGGLE_API_TOKEN, KAGGLE_KERNEL_REF, KAGGLE_EXEC_DISABLED,
 # GOOGLE_CLOUD_PROJECT/COLAB_PROJECT_ID, GOOGLE_OAUTH_TOKEN/COLAB_OAUTH_TOKEN,
-# COLAB_RUNTIME_SPEC, COLAB_IMAGE_BOOTSTRAP_URL/COLAB_VOICE_BOOTSTRAP_URL, KOKORO_*, AUTO_PUBLISH=false
+# COLAB_RUNTIME_SPEC, COLAB_IMAGE_BOOTSTRAP_URL/COLAB_VOICE_BOOTSTRAP_URL, AUTO_PUBLISH=false
+# (KAGGLE_SCRIPT_URL / COLAB_IMAGE_URL / COLAB_VOICE_URL / KOKORO_VOICE_URL are removed — do not set them)
 # See docs/ENV.md + docs/API_ENV.md for the full list.
 
 # --- Vercel env (apps/web — no secrets) ---
-# NEXT_PUBLIC_API_URL=https://your-render-api.onrender.com
+# NEXT_PUBLIC_API_URL=https://ostra-studio-1.onrender.com
 
 # Local dev:
 bun run dev              # → Next.js on 0.0.0.0:$PORT (defaults to 3000)
@@ -153,12 +158,12 @@ handoffs/               # mandatory handovers
 - `/episodes/[id]` — episode detail, pipeline, tasks, scenes, approvals, artifacts
 - `/agents` — Agent Room + live provider health probe (from Render)
 - `/activity` — immutable audit log (polls Render)
-- `/api/health` — shim that proxies to `NEXT_PUBLIC_API_URL/api/health`
+- `/api/health` — dev shim that proxies to `NEXT_PUBLIC_API_URL/api/health` (reports `DEGRADED` + reason when unset)
 
 ## API (apps/api on Render)
 
-- `GET  /health` / `GET /api/health` — truth + provider probe
-- `GET  /api/providers`
+- `GET  /health` / `GET /api/health` — unified health contract: backend status, real Supabase check, and every provider's `{ok,status,provider,reason,latencyMs,checkedAt}`
+- `GET  /api/providers` — identical envelope (single parser for the dashboard)
 - `GET|POST /api/projects` · `GET|PATCH /api/projects/:id`
 - `GET|POST /api/characters` · `PATCH|DELETE /api/characters/:id`
 - `GET|POST /api/locations` · `PATCH|DELETE /api/locations/:id`
@@ -167,7 +172,7 @@ handoffs/               # mandatory handovers
 - `GET|POST /api/tasks` · `PATCH /api/tasks/:id`
 - `GET|POST /api/events`
 - `GET|POST /api/approvals`
-- `GET|POST /api/workers` · `PATCH /api/workers/:id` · `POST /api/workers/:id/heartbeat` · `POST /api/workers/register` · `POST /api/workers/heartbeat` (by identity — now authenticated when token is set, supports dynamic endpoint, `current_task`, `metadata`)
+- `GET|POST /api/workers` · `PATCH /api/workers/:id` · `POST /api/workers/:id/heartbeat` · `POST /api/workers/register` · `POST /api/workers/heartbeat` (by identity — authenticated when token is set, supports dynamic endpoint, `current_task`, `metadata`). `GET /api/workers` returns real rows with a heartbeat-derived `health` per worker, or `503` + reason when Supabase is not configured — never a synthetic offline list.
 - Runtime supervisor:
   - `GET|POST /api/runtime/schedules` · `GET|PATCH|DELETE /api/runtime/schedules/:id` · `POST /api/runtime/schedules/seed`
   - `POST /api/runtime/tick` (Cron-gated via `x-cron-secret`/`x-worker-token` — aliases `WORKER_REGISTRATION_SECRET`) — minute-level due check + heartbeat sweep
@@ -183,4 +188,6 @@ Every agent that performs repository work MUST create or update a handover in `h
 
 ## Current status
 
-**Runtime auto-start supervisor shipped — build-verified 2026-09-26 (b2da1ce).** Kaggle auto-start lifecycle is real (`POST /api/v1/kernels/push` via `ApiSaveKernelRequest` → notebook `notebook7eae283a4a` resolved to `owner/slug` → `ref@vN` provider_run_id, no synthetic IDs); Colab image/voice starters are real (`POST https://colaboratory.googleapis.com/v1beta/runtimes` → `operations/...`) but truthful when not allowlisted (`NOT_AUTOSTARTABLE`/`AUTH_FAILED`). History/leases in Supabase, secrets server-only, mobile-first. See the latest handover in `handoffs/` for tests, known issues, and the exact next task.
+**Production integration fix — code complete, build/type/test-verified 2026-09-28 (Render redeploy of `main` required).** The Vercel dashboard no longer hard-codes provider state: it renders only `GET /api/health` + `GET /api/workers` (Render API / Supabase / every provider, each with `ONLINE`/`OFFLINE`/`DEGRADED`/`NOT_CONFIGURED`/`STARTING`/`ERROR`/`UNKNOWN` + reason). Supabase detection now uses `SUPABASE_URL ?? SUPABASE_CONNECTION_STRING ?? NEXT_PUBLIC_SUPABASE_URL` **and a real lightweight query**; the `KAGGLE_SCRIPT_URL` probe path is gone; CORS always allows `https://ostra-studio-web.vercel.app` (never `*`); `apps/api` starts with `node --import tsx src/index.ts`. The Kaggle Script worker can still only reach `ONLINE` after `KAGGLE_API_TOKEN` + `KAGGLE_KERNEL_REF` are set on Render and `bettertrade/notebook7eae283a4a` registers + heartbeats — no live Kaggle run has been observed yet.
+
+**Runtime auto-start supervisor shipped — build-verified 2026-09-27 (bettertrade/notebook7eae283a4a).** Kaggle auto-start lifecycle is real (`POST /api/v1/kernels/push` via `ApiSaveKernelRequest` → notebook `bettertrade/notebook7eae283a4a` → `ref@vN` (`bettertrade/notebook7eae283a4a@vN`) provider_run_id, no synthetic IDs; bare `notebook7eae283a4a` also resolved via search); Colab image/voice starters are real (`POST https://colaboratory.googleapis.com/v1beta/runtimes` → `operations/...`) but truthful when not allowlisted (`NOT_AUTOSTARTABLE`/`AUTH_FAILED`). History/leases in Supabase, secrets server-only, mobile-first. See the latest handover in `handoffs/` for tests, known issues, and the exact next task.

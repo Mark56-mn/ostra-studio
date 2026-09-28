@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { TopNav } from "@/components/TopNav";
+import { ProviderStatus } from "@/components/ProviderStatus";
 
 export default function Home() {
   return (
@@ -18,10 +19,9 @@ export default function Home() {
         </div>
 
         <div className="relative mx-auto max-w-[1100px] px-4 pb-10 pt-10 sm:px-6 sm:pt-16">
-          <div className="inline-flex items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 backdrop-blur">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
-            <span className="text-[11px] font-semibold tracking-[0.14em] text-zinc-300">ORCHESTRATOR ONLINE</span>
-            <span className="hidden text-[11px] text-[#6B7594] sm:inline">• no mocks • real workers • human approval required</span>
+          <div className="inline-flex flex-wrap items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 backdrop-blur">
+            <span className="text-[11px] font-semibold tracking-[0.14em] text-zinc-300">NO MOCKS · REAL WORKERS · HUMAN APPROVAL</span>
+            <span className="hidden text-[11px] text-[#6B7594] sm:inline">• live provider state below</span>
           </div>
 
           <div className="mt-6 grid gap-8 lg:grid-cols-[1.15fr_0.85fr] lg:items-start">
@@ -79,38 +79,27 @@ export default function Home() {
                     <div className="rounded-xl bg-white/[0.08] ring-1 ring-white/10" />
                   </div>
                   <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-4">
-                    <div className="inline-flex items-center gap-2 rounded-full bg-[#FF4D5A] px-2.5 py-1 text-[10px] font-bold tracking-widest text-white">EP 07 • READY_FOR_REVIEW</div>
-                    <div className="mt-2 text-[15px] font-semibold leading-tight text-white">The night the ink bled</div>
-                    <div className="text-[12px] text-white/70">Waiting for your approval — 18 scenes • 42 artifacts</div>
+                    <div className="inline-flex items-center gap-2 rounded-full bg-[#FF4D5A] px-2.5 py-1 text-[10px] font-bold tracking-widest text-white">EXAMPLE LAYOUT · UI PREVIEW</div>
+                    <div className="mt-2 text-[15px] font-semibold leading-tight text-white">The review gate</div>
+                    <div className="text-[12px] text-white/70">Illustrative only — your real episodes live in Projects</div>
                   </div>
                   <div className="absolute right-3 top-3 rounded-full bg-black/55 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur">16:9 • 1080p</div>
                 </div>
                 <div className="flex items-center justify-between gap-3 p-4">
                   <div className="flex items-center gap-2">
                     <span className="h-2 w-2 rounded-full bg-amber-400" />
-                    <span className="text-[12px] font-medium text-zinc-300">Needs human approval</span>
+                    <span className="text-[12px] font-medium text-zinc-300">Nothing publishes without you</span>
                   </div>
-                  <Link href="/projects" className="rounded-full bg-white px-4 py-2 text-[12px] font-semibold text-[#070A14]">Review</Link>
+                  <Link href="/agents" className="rounded-full bg-white px-4 py-2 text-[12px] font-semibold text-[#070A14]">Agent Room</Link>
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-2 sm:gap-3">
-                {[
-                  { k: "SCRIPT", v: "OFFLINE", c: "text-red-300", bg: "bg-red-500/10", dot: "bg-red-400", hint: "Kaggle" },
-                  { k: "IMAGE", v: "OFFLINE", c: "text-red-300", bg: "bg-red-500/10", dot: "bg-red-400", hint: "Colab" },
-                  { k: "VOICE", v: "OFFLINE", c: "text-red-300", bg: "bg-red-500/10", dot: "bg-red-400", hint: "Kokoro" },
-                ].map((w) => (
-                  <div key={w.k} className="rounded-2xl border border-white/[0.06] bg-[#0F1425] p-3">
-                    <div className="label-mono text-[#6B7594]">{w.k}</div>
-                    <div className={`mt-1 inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] font-semibold ${w.bg} ${w.c} border-current/20`}>
-                      <span className={`h-1.5 w-1.5 rounded-full ${w.dot}`} /> {w.v}
-                    </div>
-                    <div className="mt-2 text-[11px] text-[#6B7594]">{w.hint} • heartbeat ≠ task</div>
-                  </div>
-                ))}
+              <div className="rounded-2xl border border-white/[0.06] bg-[#0F1425] p-3">
+                <div className="label-mono mb-2 text-[#6B7594]">LIVE PROVIDER STATE — FROM THE RENDER API</div>
+                <ProviderStatus compact pollMs={20_000} />
               </div>
-              <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2.5 text-[12px] leading-5 text-amber-200">
-                Workers show their <span className="font-semibold">real</span> state. Unconfigured = OFFLINE, not fake success. Configure <span className="font-mono text-[11px]">KAGGLE_SCRIPT_URL</span>, <span className="font-mono text-[11px]">COLAB_IMAGE_URL</span>, <span className="font-mono text-[11px]">KOKORO_VOICE_URL</span> to go ONLINE.
+              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-2.5 text-[12px] leading-5 text-[#9AA3C0]">
+                Script AI autostarts by pushing <span className="font-mono text-[11px] text-white">bettertrade/notebook7eae283a4a</span> to Kaggle, then waits for the worker to <span className="text-white">register</span> and <span className="text-white">heartbeat</span>. Image / Voice stay <span className="text-white">NOT_CONFIGURED</span> until their Colab bootstrap is wired. Configuration alone never becomes ONLINE.
               </div>
             </div>
           </div>
@@ -155,12 +144,13 @@ export default function Home() {
               <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Orchestrator state</span><span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">SHIPPED</span></div>
               <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Provider contracts</span><span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">SHIPPED</span></div>
               <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Supabase migrations</span><span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">SHIPPED</span></div>
-              <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Script AI (Kaggle)</span><span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-300">NEEDS URL</span></div>
-              <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Image / Voice (Colab)</span><span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-300">NEEDS URL</span></div>
+              <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Runtime supervisor (leases)</span><span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">SHIPPED</span></div>
+              <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Script AI (Kaggle) autostart</span><span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-300">WIRED</span></div>
+              <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Image / Voice (Colab)</span><span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-zinc-400">PENDING</span></div>
               <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">FFmpeg render</span><span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-zinc-400">PHASE 7</span></div>
               <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">YouTube upload</span><span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-zinc-400">PHASE 9</span></div>
             </div>
-            <div className="mt-3 text-[11px] leading-5 text-[#6B7594]">Docs live in <span className="font-mono">supabase/migrations/001_initial.sql</span>. Wire env vars → workers go ONLINE without changing workflow code.</div>
+            <div className="mt-3 text-[11px] leading-5 text-[#6B7594]">Live availability is never asserted here — open the <Link href="/agents" className="text-white underline decoration-white/30 underline-offset-2">Agent Room</Link> for the real Render / Supabase / provider state.</div>
           </div>
         </div>
       </section>

@@ -9,11 +9,15 @@
 Set in Vercel project env (and locally in `apps/web/.env.local` for dev):
 
 ```bash
-NEXT_PUBLIC_API_URL=https://your-render-api.onrender.com
+NEXT_PUBLIC_API_URL=https://ostra-studio-1.onrender.com   # the real production API
 NEXT_PUBLIC_APP_NAME=Ostra Studio
 ```
 
-Leave `NEXT_PUBLIC_API_URL` empty only for local offline truth (shows OFFLINE states without Render).
+`NEXT_PUBLIC_API_URL` must be set for the **Production** environment in Vercel. Never put `KAGGLE_API_TOKEN`
+or `SUPABASE_SERVICE_ROLE_KEY` here — the browser must never receive them.
+
+If it is missing, the dashboard says `RENDER API · NOT_CONFIGURED` (not a provider failure). If the API is
+unreachable it says `BACKEND OFFLINE — Unable to reach Render API`. It never falls back to fake worker rows.
 
 ## Render — `apps/api` (backend + Orchestrator + Scheduler + Runtime Supervisor, owns all secrets)
 
@@ -30,8 +34,10 @@ SUPABASE_SERVICE_ROLE_KEY=eyJ...        # server-only, never NEXT_PUBLIC_
 SUPABASE_ANON_KEY=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 
-# CORS — which Vercel origins may call the API (comma-separated)
-CORS_ORIGINS=https://your-site.vercel.app,https://your-site-preview.vercel.app
+# CORS — EXTRA origins allowed to call the API (comma-separated).
+# https://ostra-studio-web.vercel.app, *.vercel.app previews and http(s)://localhost:* are always allowed.
+# `*` is never used (worker register/heartbeat are token-protected).
+CORS_ORIGINS=https://ostra-studio-web.vercel.app
 
 # --- Runtime Supervisor ---
 # Scheduler (Render owns the tick; no frontend scheduler)
@@ -42,11 +48,12 @@ WORKER_REGISTRATION_TOKEN=change-me       # alias: WORKER_REGISTRATION_SECRET �
 WORKER_REGISTRATION_SECRET=change-me      # alias for WORKER_REGISTRATION_TOKEN (either works)
 WORKER_HEARTBEAT_TIMEOUT_SEC=90           # seconds before ONLINE → OFFLINE (per-worker, tunable via workers.heartbeat_timeout_sec)
 
-# Worker adapters — absence = OFFLINE (truthful, not an error). Set to go ONLINE:
-KAGGLE_SCRIPT_URL=https://...             # Script AI endpoint (when reachable, ScriptProvider probes it)
-KAGGLE_API_TOKEN=...                      # Kaggle JSON key (username:key) — server-only, redacted in all logs/responses
-KAGGLE_KERNEL_REF=mark56/studio-script-kernel  # Kernel ref for auto-start (required — exact notebook, e.g. mark56/studio-script-kernel)
-KAGGLE_EXEC_DISABLED=false                # set true for probe-only mode (auth check without execution)
+# Script AI (Kaggle) — the supervisor pushes the notebook and waits for the worker to self-register.
+# There is NO KAGGLE_SCRIPT_URL anymore: a hand-maintained endpoint is not part of the architecture.
+# Both values below are required for autostart; configuration alone is NEVER ONLINE.
+KAGGLE_API_TOKEN=...                      # JSON {"username","key"}, username:key, or KGAT_* Bearer — server-only, always redacted
+KAGGLE_KERNEL_REF=bettertrade/notebook7eae283a4a  # REQUIRED — exact notebook ref (owner/slug)
+KAGGLE_EXEC_DISABLED=false                # true => probe-only mode (auth check, no push)
 
 # Colab Image / Voice — real auto-start via Colab Enterprise API (colaboratory.googleapis.com)
 # When unset, Colab starters remain truthfully NOT_AUTOSTARTABLE — no fake start.
@@ -67,10 +74,10 @@ COLAB_BOOTSTRAP_URL=https://...           # generic fallback for both workers
 COLAB_RUNTIME_SPEC=...                    # runtime spec id, validated via GET /v1beta/runtimespecs (eligible check)
 COLAB_RUNTIME_ID=...                      # optional runtimeId for POST /v1beta/runtimes?runtimeId=…
 
-# Legacy health probes (no auto-start; health-probe only)
-COLAB_IMAGE_URL=https://...               # Image AI — health probe (truthful OFFLINE if unset)
-COLAB_VOICE_URL=https://...               # Voice AI — health probe (truthful OFFLINE if unset)
-KOKORO_VOICE_URL=https://...              # Kokoro-82M — health probe
+# REMOVED: COLAB_IMAGE_URL / COLAB_VOICE_URL / KOKORO_VOICE_URL / KAGGLE_SCRIPT_URL.
+# Those probe-only endpoints are no longer read anywhere in the codebase. Image/Voice state now comes
+# from a real Colab runtime + worker registration; Script state comes from the Kaggle push lifecycle.
+# If they are still set on Render they are ignored (they cannot make a provider appear ONLINE).
 
 # YouTube OAuth (Phase 9)
 YOUTUBE_CLIENT_ID=
@@ -86,7 +93,7 @@ PORT=3001                                 # Render injects PORT; 3001 is the loc
 
 - Starter: `KaggleRuntimeStarter` (`packages/shared/src/providers/runtimeStarters.ts`)
 - Auth: `KAGGLE_API_TOKEN` (may be JSON `{"username","key"}`, `username:key` Basic, or `KGAT_*` Bearer) via `getKaggleAuthHeader()`.
-- Kernel ref: `KAGGLE_KERNEL_REF` supports `owner/slug` or legacy `notebook7eae283a4a` resolved via `resolveKaggleKernelRef()` → `GET /api/v1/kernels/list?mine=true&search=` + owner inference.
+- Kernel ref: `KAGGLE_KERNEL_REF` is `bettertrade/notebook7eae283a4a` (verified exact notebook for §38). Legacy bare `notebook7eae283a4a` is also supported via `resolveKaggleKernelRef()` → `GET /api/v1/kernels/list?mine=true&search=` + owner inference; `bettertrade/notebook7eae283a4a` with slash bypasses that search and goes direct to `GET /api/v1/kernels/bettertrade/notebook7eae283a4a` → `POST /api/v1/kernels/push`.
 - Flow: `GET /api/v1/kernels/list?mine=true&pageSize=1` auth check → `GET /api/v1/kernels/{owner}/{slug}` fetch source → `POST /api/v1/kernels/push` (`ApiSaveKernelRequest{ slug, text, language, kernelType, isPrivate, enableInternet, … }`) — the SDK equivalent `kaggle.kernels.kernels_api_client.save_kernel(...)`. On success, response `ApiSaveKernelResponse{ versionNumber, url, ref }` is mapped to `provider_run_id = ref@vN` (never synthetic `kaggle:startup_request_id`).
 - Quota/rate mapping: 401/403→`AUTH_FAILED`, 429→`RATE_LIMITED`, 402→`QUOTA_EXCEEDED`.
 
@@ -107,7 +114,39 @@ PORT=3001                                 # Render injects PORT; 3001 is the loc
 3. Create Storage bucket `ostra-assets` (private with signed URLs or public — your call)
 4. Copy URL + anon key + service_role key into the Render env as above
 
+## Status vocabulary (used by the dashboard and the API)
+
+Every provider/surface reports exactly one of these, plus a human-readable `reason`:
+
+| Status | Meaning |
+| --- | --- |
+| `ONLINE` | A real check passed, or a real worker has a **fresh heartbeat** |
+| `STARTING` | A startup request is in flight (REQUESTED/STARTING/REGISTERING) and no worker has registered yet |
+| `OFFLINE` | Configured (or previously running) but nothing is running / the heartbeat expired |
+| `DEGRADED` | Reachable but incomplete (e.g. Supabase connected, migrations missing) |
+| `NOT_CONFIGURED` | Required credentials/host are missing — the reason names the exact keys |
+| `ERROR` | The provider/startup actually failed (reason + `errorCode`) |
+| `UNKNOWN` | Indeterminate (must never be presented as working) |
+
+Rules the code enforces:
+
+- Configuration presence **never** yields `ONLINE`.
+- `ONLINE` for a worker requires a heartbeat younger than `heartbeat_timeout_sec` (default 90s).
+- A stale heartbeat flips the worker to `OFFLINE` with `reason: "heartbeat expired — last heartbeat …"`.
+- One provider failing never hides the others; `/api/health` always reports every provider.
+- All external checks are bounded (Supabase 5s; Kaggle/Colab requests 8–15s) so a dead endpoint cannot hang health.
+
+### Health endpoints
+
+- `GET /health` and `GET /api/health` return the same envelope:
+  `{ ok, status, app, host, autoPublish, supabase: ProviderHealth, providers: { <id>: { id, provider, runtime, health } }, timestamp, at }`.
+  `ok:true` requires Supabase `ONLINE` **and** no provider in `ERROR`.
+- `GET /api/providers` returns the identical envelope (one parser for the dashboard).
+- `GET /api/workers` returns the real registry rows with a derived `health` object, or `503` + `reason` when
+  Supabase is not configured (there is no synthetic worker list).
+
 ## Old single-env layout (deprecated)
 
-If you still have root-level `NEXT_PUBLIC_SUPABASE_URL` etc. without `NEXT_PUBLIC_API_URL`, the web now proxies
-through `apps/web/src/app/api/health` as a local shim but will show a 502 hint telling you to set the Render URL.
+If root-level `NEXT_PUBLIC_SUPABASE_URL` etc. exist without `NEXT_PUBLIC_API_URL`, the web proxies
+through `apps/web/src/app/api/health` as a local dev shim, which now reports `DEGRADED` +
+`Backend not configured (NEXT_PUBLIC_API_URL missing)` instead of inventing provider states.

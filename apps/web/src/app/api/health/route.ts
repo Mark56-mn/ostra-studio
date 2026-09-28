@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
-// Vercel frontend must NOT own Supabase secrets. Real health lives on Render (NEXT_PUBLIC_API_URL).
-// This shim keeps local dev usable when the Render API is not running yet.
+// The Vercel frontend must NOT own Supabase secrets. Real health lives on Render (NEXT_PUBLIC_API_URL).
+// This shim exists for local development and never fabricates provider states.
 export async function GET() {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "");
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/+$/, "");
+  const timestamp = new Date().toISOString();
+
   if (apiUrl) {
     try {
       const r = await fetch(`${apiUrl}/api/health`, { cache: "no-store" });
@@ -15,32 +17,45 @@ export async function GET() {
       return NextResponse.json(
         {
           ok: false,
+          status: "ERROR",
           app: "ostra-web",
           host: "vercel",
-          error: `Render API unreachable at ${apiUrl}`,
-          reason: e instanceof Error ? e.message : String(e),
-          hint: "Set NEXT_PUBLIC_API_URL to your Render API URL (e.g. https://ostra-api.onrender.com). Render must own SUPABASE_* and worker env vars.",
+          reason: `Render API unreachable at ${apiUrl}`,
+          error: e instanceof Error ? e.message : String(e),
+          supabase: {
+            ok: false,
+            status: "UNKNOWN",
+            provider: "supabase",
+            reason: "Render API unreachable — Supabase state cannot be verified",
+            checkedAt: timestamp,
+          },
+          providers: {},
+          timestamp,
+          at: timestamp,
         },
         { status: 502 }
       );
     }
   }
-  // Local offline fallback — no mocks, just truthful OFFLINE states
+
+  // Local dev with no Render API configured: say exactly that. No fake providers.
   return NextResponse.json({
-    ok: true,
+    ok: false,
+    status: "DEGRADED",
     app: "ostra-web",
-    host: "vercel (local)",
-    at: new Date().toISOString(),
+    host: "local",
     autoPublish: false,
-    supabase: "not_configured",
-    note: "Set NEXT_PUBLIC_API_URL to your Render API to proxy real health. Until then this is local OFFLINE truth.",
-    providers: {
-      script: { ok: false, status: "OFFLINE", reason: "Render API not configured (NEXT_PUBLIC_API_URL missing)" },
-      image: { ok: false, status: "OFFLINE", reason: "Render API not configured" },
-      voice: { ok: false, status: "OFFLINE", reason: "Render API not configured" },
-      video: { ok: false, status: "OFFLINE", reason: "Render API not configured — FFmpeg is independently replaceable" },
-      storage: { ok: false, status: "OFFLINE", reason: "Render owns Supabase Storage" },
-      youtube: { ok: false, status: "OFFLINE", reason: "Render owns YouTube OAuth" },
+    reason:
+      "NEXT_PUBLIC_API_URL is not set. This Next dev server is not the backend — start the Render API (or set the env var) to see real state.",
+    supabase: {
+      ok: false,
+      status: "NOT_CONFIGURED",
+      provider: "supabase",
+      reason: "Backend not configured (NEXT_PUBLIC_API_URL missing)",
+      checkedAt: timestamp,
     },
+    providers: {},
+    timestamp,
+    at: timestamp,
   });
 }

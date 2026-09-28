@@ -3,8 +3,10 @@ import { useEffect, useMemo, useState } from "react";
 import { TopNav } from "@/components/TopNav";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
-import { AgentRoom, OFFLINE_AGENTS, type AgentRow } from "@/components/AgentRoom";
+import { AgentRoom, type AgentRow } from "@/components/AgentRoom";
+import { ProviderStatus } from "@/components/ProviderStatus";
 import { apiUrl } from "@/lib/api";
+import { fetchWorkers } from "@/lib/health";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 type Schedule = {
@@ -20,7 +22,6 @@ type HistoryRow = {
   requested_at:string; started_at?:string|null; registered_at?:string|null; completed_at?:string|null;
   worker_id?:string|null;
 };
-type HealthResp = Record<string, { provider?: string; health?: { ok:boolean; status:string; reason?:string; latencyMs?:number; checkedAt?:string } }>;
 
 const DAYS: Record<number,string> = {0:"Sun",1:"Mon",2:"Tue",3:"Wed",4:"Thu",5:"Fri",6:"Sat"};
 const DAYS_FULL = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
@@ -45,8 +46,8 @@ function nextRunUtcHint(s: Schedule): string {
 export default function RuntimesPage() {
   const [schedules, setSchedules] = useState<Schedule[] | null>(null);
   const [history, setHistory] = useState<HistoryRow[]>([]);
-  const [agents, setAgents] = useState<AgentRow[]>(OFFLINE_AGENTS);
-  const [health, setHealth] = useState<HealthResp | null>(null);
+  const [agents, setAgents] = useState<AgentRow[]>([]);
+  const [backendReachable, setBackendReachable] = useState<boolean|null>(null);
   const [err, setErr] = useState<string|null>(null);
   const [notice, setNotice] = useState<string|null>(null);
   const [busy, setBusy] = useState<string|null>(null);
@@ -66,19 +67,19 @@ export default function RuntimesPage() {
     if (r.ok) setHistory(j.history ?? []);
   }
   async function loadAgents() {
-    const [w,h] = await Promise.all([fetch(apiUrl("/api/workers")).then(r=>r.json()).catch(()=>({workers:OFFLINE_AGENTS})), fetch(apiUrl("/api/providers")).then(r=>r.json()).catch(()=>null)]);
-    if (w.workers) setAgents(w.workers.map((x: Record<string,unknown>)=>({
-      id: String(x["id"]), type: String(x["type"]) as AgentRow["type"],
-      provider: String(x["provider"]), model: (x["model"] as string) ?? null,
-      runtime: (x["runtime"] as string) ?? null, status: String(x["status"]),
-      lastHeartbeatAt: (x["last_heartbeat_at"] as string) ?? (x["last_seen_at"] as string) ?? null,
-      error: (x["error_message"] as string) ?? (x["error"] as string) ?? null,
-      currentTaskId: (x["current_task"] as string) ?? (x["current_task_id"] as string) ?? null,
-      endpoint: (x["endpoint"] as string) ?? null,
-      heartbeatTimeoutSec: (x["heartbeat_timeout_sec"] as number) ?? null,
-      registeredAt: (x["registered_at"] as string) ?? null,
-    } as unknown as AgentRow)));
-    if (h) setHealth(h);
+    const r = await fetchWorkers();
+    setBackendReachable(r.reachable);
+    setAgents(r.workers.map((w) => ({
+      id: String(w.id), type: String(w.type) as AgentRow["type"],
+      provider: String(w.provider), model: w.model ?? null,
+      runtime: w.runtime ?? null, status: String(w.status),
+      health: w.health ? { status: w.health.status, reason: w.health.reason, heartbeatAgeSec: w.health.heartbeatAgeSec } : null,
+      lastHeartbeatAt: w.last_heartbeat_at ?? null,
+      error: w.error_message ?? w.error ?? null,
+      currentTaskId: w.current_task_id ?? null,
+      endpoint: w.endpoint ?? null,
+      heartbeatTimeoutSec: w.heartbeat_timeout_sec ?? null,
+    } as AgentRow)));
   }
 
   useEffect(()=>{ loadSchedules(); loadHistory(); loadAgents(); const iv=setInterval(()=>{ loadHistory(); loadAgents(); }, 12_000); return ()=>clearInterval(iv); }, []);
@@ -183,21 +184,13 @@ export default function RuntimesPage() {
 
         {/* Health strip */}
         <Card>
-          <CardHeader kicker="PROVIDER HEALTH" title="Live probe — Render owns the call" />
-          {!health ? <div className="text-sm text-[#6B7594]">Loading…</div> : (
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {Object.entries(health).map(([k,v])=> {
-                const ok = v.health?.ok;
-                return (
-                  <div key={k} className={`rounded-xl border px-3 py-3 ${ok ? "border-emerald-500/20 bg-emerald-500/10" : "border-white/[0.06] bg-white/[0.03]"}`}>
-                    <div className="flex items-center justify-between"><span className="text-[12px] font-bold text-white">{k.toUpperCase()} · {v.provider ?? "—"}</span><span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${ok ? "bg-emerald-500 text-white" : "bg-white/10 text-zinc-300"}`}>{v.health?.status ?? "UNKNOWN"}</span></div>
-                    {v.health?.reason && <div className="mt-1 text-[12px] text-[#9AA3C0]">{v.health.reason}</div>}
-                    <div className="mt-1 flex gap-3 font-mono text-[11px] text-[#6B7594]">{typeof v.health?.latencyMs==="number" && <span>{v.health.latencyMs}ms</span>}{v.health?.checkedAt && <span>{new Date(v.health.checkedAt).toLocaleTimeString()}</span>}</div>
-                  </div>
-                );
-              })}
+          <CardHeader kicker="PROVIDER HEALTH" title="Live state — Render owns the call" />
+          {backendReachable === false && (
+            <div className="mb-2 rounded-xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-200">
+              <span className="font-semibold">BACKEND OFFLINE</span> — Unable to reach the Render API, so no provider state can be verified.
             </div>
           )}
+          <ProviderStatus pollMs={15_000} />
           <div className="mt-3 hidden gap-2 sm:flex">
             <button onClick={()=>runNowWorker("script","kaggle","kaggle")} disabled={!!busy} className="rounded-full bg-[#FF4D5A] px-4 py-2 text-[13px] font-semibold text-white hover:bg-[#ff5e6a] disabled:opacity-60">Run Now Script/Kaggle</button>
             <button onClick={()=>runNowWorker("image","colab","colab-image")} disabled={!!busy} className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-[13px] font-semibold text-white hover:bg-white/10 disabled:opacity-60">Run Now Image/Colab</button>

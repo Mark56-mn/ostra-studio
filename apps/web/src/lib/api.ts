@@ -1,12 +1,21 @@
 // apps/web — API client
-// In production Vercel, set NEXT_PUBLIC_API_URL to the Render API URL (e.g. https://ostra-api.onrender.com).
-// In local dev without Render, fallback to "" which means same-origin Next API — we keep a tiny
-// local /api/health shim for offline development, but real deployments must talk to Render.
+// In production (Vercel) set NEXT_PUBLIC_API_URL to the Render API URL:
+//   NEXT_PUBLIC_API_URL=https://ostra-studio-1.onrender.com
+// Only NEXT_PUBLIC_* values may be bundled into the browser. No secrets live here.
+//
+// `apiUrl("/api/health")` must produce `https://ostra-studio-1.onrender.com/api/health`
+// (never `/api/api/health`, never a bare `/health` when the caller asked for `/api/health`).
 
+/** Normalized API base: trimmed, trailing slashes removed ("" when unset → same-origin dev shim). */
 export function apiBase(): string {
   const raw = process.env.NEXT_PUBLIC_API_URL?.trim() ?? "";
   if (!raw) return "";
-  return raw.replace(/\/$/, "");
+  return raw.replace(/\/+$/, "");
+}
+
+/** True when a Render API base is configured for production. */
+export function isBackendConfigured(): boolean {
+  return apiBase() !== "";
 }
 
 export function apiUrl(path: string): string {

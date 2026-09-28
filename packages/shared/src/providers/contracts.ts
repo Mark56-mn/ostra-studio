@@ -1,13 +1,33 @@
 // Provider capability contracts
 // Every provider speaks one of these interfaces. Workflow logic must not depend on the implementation.
-// A provider that is not configured returns { ok: false, status: "OFFLINE", reason } — never a fake success.
+// A provider that is not configured returns { ok: false, status: "NOT_CONFIGURED", reason } — never a fake success.
+// Only status "ONLINE" (ok:true) means the provider is actually usable.
+
+// Canonical provider status vocabulary. Every surface (backend + dashboard) uses exactly these.
+// ONLINE is the ONLY status that may ever be presented as "working".
+export type ProviderStatus =
+  | "ONLINE"
+  | "OFFLINE"
+  | "DEGRADED"
+  | "NOT_CONFIGURED"
+  | "STARTING"
+  | "ERROR"
+  | "UNKNOWN";
 
 export type ProviderHealth = {
   ok: boolean;
-  status: "ONLINE" | "OFFLINE" | "CONNECTING" | "DEGRADED";
+  status: ProviderStatus;
+  /** Provider/runtime label, e.g. "kaggle", "colab-image", "supabase". Never contains secrets. */
+  provider?: string;
   latencyMs?: number;
   reason?: string;
   checkedAt: string;
+  /** Last observed heartbeat (worker-backed providers only). */
+  lastHeartbeatAt?: string | null;
+  /** Seconds since the last heartbeat, when known. */
+  heartbeatAgeSec?: number | null;
+  /** Non-secret operational detail (attempt ids, endpoint host, error codes). */
+  detail?: Record<string, unknown>;
 };
 
 export type ProviderTaskResult<TOutput = Record<string, unknown>> = {
@@ -81,8 +101,7 @@ export type ProviderRegistry = {
 };
 
 export function healthLabel(h: ProviderHealth | null | undefined): string {
-  if (!h) return "OFFLINE";
-  if (!h.ok) return h.status;
+  if (!h) return "UNKNOWN";
   return h.status;
 }
 
