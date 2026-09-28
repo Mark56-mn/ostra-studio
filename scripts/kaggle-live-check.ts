@@ -9,6 +9,7 @@
  * Usage (from the repo root):
  *   bun scripts/kaggle-live-check.ts          # config + auth + kernel metadata (read-only)
  *   bun scripts/kaggle-live-check.ts --push   # also push a REAL new kernel version (starts a run)
+ *   bun scripts/kaggle-live-check.ts --logs   # read the last run's output and print the [ostra] bootstrap lines
  *
  * --kernel-ref=<owner/slug> probes a specific kernel without adding it to the environment. The
  * env-read status is still reported honestly, so a probe ref never masks a missing production key.
@@ -25,6 +26,7 @@ import {
 
 const KAGGLE_API = "https://www.kaggle.com/api/v1";
 const push = process.argv.includes("--push");
+const logs = process.argv.includes("--logs");
 
 function presence(name: string, raw: string | undefined): string {
   if (raw === undefined) return `${name}=MISSING`;
@@ -126,6 +128,45 @@ async function main(): Promise<number> {
     }
   } else {
     console.log("\n--- 3) Kernel ref has no owner; the runtime resolves it via the Kaggle API at start time ---");
+  }
+
+  // ── 3b. Optional: read the last run's log (why a worker did or did not register) ──
+  if (logs && owner) {
+    console.log("\n--- 3b) Last run output (bootstrap log) ---");
+    const listingUrl = `${KAGGLE_API}/kernels/list?group=profile&pageSize=100&search=${encodeURIComponent(slug)}`;
+    try {
+      const lr = await fetch(listingUrl, { headers: { Authorization: authHeader }, signal: AbortSignal.timeout(20000) });
+      if (lr.ok) {
+        const lj = (await lr.json().catch(() => null)) as Record<string, unknown> | null;
+        const items: Array<Record<string, unknown>> = Array.isArray(lj) ? (lj as Array<Record<string, unknown>>) : ((lj?.kernels as Array<Record<string, unknown>>) ?? []);
+        const match = items.find((k) => (k.slug as string) === slug || (k.ref as string) === `${owner}/${slug}`);
+        if (match) console.log(`  lastRunTime=${String(match.lastRunTime ?? "(not reported)")} totalVotes=${String(match.totalVotes ?? "(n/a)")}`);
+      }
+    } catch { /* listing is best-effort */ }
+
+    const outUrl = `${KAGGLE_API}/kernels/output?user_name=${encodeURIComponent(owner)}&kernel_slug=${encodeURIComponent(slug)}`;
+    const outRes = await fetch(outUrl, { headers: { Authorization: authHeader }, signal: AbortSignal.timeout(25000) }).catch(() => null);
+    if (!outRes) {
+      console.log(`  GET ${outUrl} -> unreachable`);
+    } else {
+      console.log(`  GET ${outUrl} -> HTTP ${outRes.status}`);
+      if (outRes.ok) {
+        const oj = (await outRes.json().catch(() => null)) as { files?: Array<{ name?: string; size?: number; url?: string }> } | null;
+        const files = oj?.files ?? [];
+        console.log(`  output files: ${files.length}`);
+        for (const f of files.slice(0, 20)) console.log(`    - ${String(f.name)} (${String(f.size ?? "?")} bytes)`);
+        for (const f of files) {
+          if (!f.url || !/\.(ipynb|json|txt|log)$/.test(String(f.name))) continue;
+          const txt = await fetch(f.url, { signal: AbortSignal.timeout(25000) }).then((r) => r.text()).catch(() => "");
+          const lines = txt.split("\n").filter((l) => l.includes("[ostra]")).slice(0, 40);
+          if (lines.length) {
+            console.log(`\n  [ostra] bootstrap lines from ${String(f.name)}:`);
+            for (const l of lines) console.log(`    ${l.replace(/\\n/g, " ").trim().slice(0, 220)}`);
+          }
+        }
+      }
+    }
+    console.log("  NOTE: no output yet means the run has not finished (or has not started).");
   }
 
   // ── 4. Optional real push ──────────────────────────────────────────────────

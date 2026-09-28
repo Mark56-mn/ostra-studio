@@ -104,7 +104,7 @@ PORT=3001                                 # Render injects PORT; 3001 is the loc
   - `GET /api/v1/kernels/{owner}/{slug}` serves the **HTML site page** (HTTP 404, `text/html` for API clients). The notebook source must come from `/kernels/pull`.
   - `KGAT_*` tokens authenticate as `Bearer`, not Basic. Basic `username:key` is only for legacy keys.
 - If the source cannot be read, the starter fails with the real HTTP status and **never** calls push.
-- Verify credentials without starting a run: `bun run verify:kaggle --kernel-ref=bettertrade/notebook7eae283a4a` (add `--push` to start a real version).
+- Verify credentials without starting a run: `bun run verify:kaggle --kernel-ref=bettertrade/notebook7eae283a4a` (add `--push` to start a real version). Add `--logs` to read the last run's `lastRunTime` and print its `[ostra]` bootstrap lines — the fastest way to see *why* a worker did or did not register (run output only exists once the run finishes).
 - Quota/rate mapping: 401/403→`AUTH_FAILED`, 429→`RATE_LIMITED`, 402→`QUOTA_EXCEEDED`.
 
 ### Kaggle notebook bootstrap (what actually makes Script AI ONLINE)
