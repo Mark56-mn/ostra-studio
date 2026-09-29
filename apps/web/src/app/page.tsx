@@ -38,6 +38,9 @@ export default function Home() {
                 <Link href="/projects" className="inline-flex items-center gap-2 rounded-full bg-[#FF4D5A] px-6 py-3 text-[14px] font-semibold text-white shadow-[0_12px_28px_rgba(255,77,90,0.35)] transition hover:bg-[#ff5e6a]">
                   Enter studio <span aria-hidden>→</span>
                 </Link>
+                <Link href="/runner" className="inline-flex items-center rounded-full border border-[#FF4D5A]/30 bg-[#FF4D5A]/10 px-6 py-3 text-[14px] font-semibold text-[#FF8A93] backdrop-blur transition hover:bg-[#FF4D5A]/20">
+                  Run an AI now
+                </Link>
                 <Link href="/agents" className="inline-flex items-center rounded-full border border-white/10 bg-white/[0.06] px-6 py-3 text-[14px] font-semibold text-white backdrop-blur hover:bg-white/10">
                   Check Agent Room
                 </Link>
