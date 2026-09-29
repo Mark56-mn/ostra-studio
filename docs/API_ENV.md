@@ -92,6 +92,30 @@ Supabase migrations (run once, idempotent, in order):
 
 Storage bucket: `ostra-assets`
 
+## Render build & start (deploy config)
+
+Render hosts `apps/api` from this Bun workspace. Known-good service settings:
+
+- **Root Directory:** repository root (the workspace root), **not** `apps/api` — `@ostra/shared`
+  is a sibling workspace package resolved via the API's tsconfig `paths` (`../../packages/shared/src/index.ts`).
+- **Runtime:** Node **≥ 20.6** (`node --import tsx` requires Node 20.6+; Node 24 is verified). Declared in
+  `engines.node` on the root and `apps/api` `package.json`.
+- **Build Command:** `bun install && bun --filter @ostra/api build` (`build` = `tsc --noEmit`, a typecheck — it emits no files).
+- **Start Command:** `bun --filter @ostra/api start` (equivalently, from `apps/api`: `node --import tsx src/index.ts`).
+- `PORT` is injected by Render; the app binds `0.0.0.0:$PORT` (local default `3001`).
+
+### Deploy-failure checklist
+
+- **Only `bun.lock` ships** (no `package-lock.json`/`yarn.lock`). Use `bun install`; `npm ci` fails outright.
+- **`tsx` is a devDependency.** Never install with `--omit=dev`/`--production`, or `node --import tsx`
+  cannot resolve the loader and the service exits at start.
+- **Never resolve TypeScript globally** (`npx tsc` / `bunx tsc` without a local install). The current
+  `typescript@latest` is **7.x**, which **removed `baseUrl`** and fails the build with
+  `error TS5102: Option 'baseUrl' has been removed`. The tsconfigs no longer set `baseUrl` (redundant
+  since TS 4.1 — `paths` resolve relative to the config file), so any TS ≥ 4.1 works.
+- A build that typechecks green locally but fails on Render almost always means an **unpinned tool**
+  (global TS) or an **install that dropped devDependencies** — not a source error.
+
 ## Health contract
 
 `GET /health` and `GET /api/health` return the identical envelope; `GET /api/providers` returns the same

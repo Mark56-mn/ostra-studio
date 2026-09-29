@@ -1,6 +1,9 @@
 {
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20.6.0"
+  },
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "dev:web": "bun --filter @ostra/web dev",

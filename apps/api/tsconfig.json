@@ -12,8 +12,7 @@
       "@/*": ["./src/*"],
       "@ostra/shared": ["../../packages/shared/src/index.ts"],
       "@ostra/shared/*": ["../../packages/shared/src/*"]
-    },
-    "baseUrl": "."
+    }
   },
   "include": ["src/**/*", "../../packages/shared/src/**/*"],
   "exclude": ["node_modules", "dist"]
