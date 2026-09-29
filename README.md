@@ -145,6 +145,8 @@ packages/shared/        # Domain, contracts, state, events — single source of 
 supabase/migrations/001_initial.sql  # domain
 supabase/migrations/002_runtime_supervisor.sql  # schedules + leases + history + worker extensions
 supabase/migrations/003_runtime_supervisor_extensions.sql  # full spec §4-5 (worker_id, error_code, startup_request_id, status lifecycle)
+supabase/migrations/004_model_controls.sql  # per-model on/off switches (/api/models, /models)
+supabase/migrations/005_conversations.sql  # Agent Chat rooms + messages (/api/chat/*, /chat)
 docs/ENV.md             # split env reference (now includes supervisor vars + aliases)
 handoffs/               # mandatory handovers
 ```

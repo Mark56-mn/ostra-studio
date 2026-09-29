@@ -41,6 +41,9 @@ export default function Home() {
                 <Link href="/runner" className="inline-flex items-center rounded-full border border-[#FF4D5A]/30 bg-[#FF4D5A]/10 px-6 py-3 text-[14px] font-semibold text-[#FF8A93] backdrop-blur transition hover:bg-[#FF4D5A]/20">
                   Run an AI now
                 </Link>
+                <Link href="/chat" className="inline-flex items-center gap-2 rounded-full border border-[#3DE0B3]/30 bg-[#3DE0B3]/10 px-6 py-3 text-[14px] font-semibold text-[#7FF0CE] backdrop-blur transition hover:bg-[#3DE0B3]/20">
+                  Chat with the agent <span aria-hidden>→</span>
+                </Link>
                 <Link href="/agents" className="inline-flex items-center rounded-full border border-white/10 bg-white/[0.06] px-6 py-3 text-[14px] font-semibold text-white backdrop-blur hover:bg-white/10">
                   Check Agent Room
                 </Link>
@@ -93,7 +96,10 @@ export default function Home() {
                     <span className="h-2 w-2 rounded-full bg-amber-400" />
                     <span className="text-[12px] font-medium text-zinc-300">Nothing publishes without you</span>
                   </div>
-                  <Link href="/agents" className="rounded-full bg-white px-4 py-2 text-[12px] font-semibold text-[#070A14]">Agent Room</Link>
+                  <div className="flex items-center gap-2">
+                    <Link href="/chat" className="rounded-full bg-white px-4 py-2 text-[12px] font-semibold text-[#070A14]">Agent Chat</Link>
+                    <Link href="/agents" className="rounded-full border border-white/15 bg-white/[0.06] px-4 py-2 text-[12px] font-semibold text-white">Agent Room</Link>
+                  </div>
                 </div>
               </div>
 
@@ -149,6 +155,7 @@ export default function Home() {
               <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Supabase migrations</span><span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">SHIPPED</span></div>
               <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Runtime supervisor (leases)</span><span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">SHIPPED</span></div>
               <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Script AI (Kaggle) autostart</span><span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-300">WIRED</span></div>
+              <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Agent Chat → store writes</span><span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">SHIPPED</span></div>
               <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">Image / Voice (Colab)</span><span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-zinc-400">PENDING</span></div>
               <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">FFmpeg render</span><span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-zinc-400">PHASE 7</span></div>
               <div className="flex items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2"><span className="text-zinc-300">YouTube upload</span><span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-zinc-400">PHASE 9</span></div>

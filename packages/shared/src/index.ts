@@ -2,6 +2,7 @@
 // Re-export explicitly to avoid name collisions (e.g. EpisodeStatus in both schemas + state)
 export * from "./domain/schemas";
 export * from "./domain/schedules";
+export * from "./agent/protocol";
 export * from "./providers/contracts";
 export * from "./providers/health";
 export * from "./providers/models";

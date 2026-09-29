@@ -1,0 +1,341 @@
+// apps/api/src/lib/agentRuntime.ts
+// Resolves WHICH real AI answers in the Agent Chat room, and calls it.
+//
+// Truth rules:
+//  - The room prefers the project's own Script AI: the `script` worker that is genuinely ONLINE
+//    (fresh heartbeat) in Supabase, reached at the tunnel endpoint it registered. No endpoint is
+//    ever hard-coded.
+//  - If no project worker is online, a hosted OpenAI-compatible fallback is used ONLY when
+//    OPENAI_API_KEY is configured. Nothing is simulated: when there is no usable backend the caller
+//    gets `available: false` plus the real reason, and the UI says so.
+//  - Endpoint URLs (and any credential) are never returned to the client — only the host.
+//  - A failed call reports the real transport/HTTP error. There is no fabricated answer.
+
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { workerDisplayHealth, type WorkerHealthRow } from "@ostra/shared";
+
+export type AgentBackendKind = "project_worker" | "hosted_fallback";
+
+/** A resolved, callable backend. `endpoint` is server-side only. */
+export type AgentBackend = {
+  kind: AgentBackendKind;
+  provider: string;
+  model: string;
+  /** Base URL to POST to. Never sent to the browser. */
+  endpoint: string;
+  /** Host only, safe to display (null when the registered endpoint is not a URL). */
+  endpointHost: string | null;
+  /** Supabase worker row id, when the backend is a project worker. */
+  workerId?: string | null;
+};
+
+/** One entry of "what we looked at", so an unavailable room can explain itself honestly. */
+export type AgentCandidate = {
+  workerId: string | null;
+  provider: string;
+  status: string;
+  reason: string;
+  endpointHost: string | null;
+};
+
+/** Client-safe description of the current backend situation. No secrets, no full URLs. */
+export type AgentBackendStatus = {
+  available: boolean;
+  kind: AgentBackendKind | null;
+  provider: string | null;
+  model: string | null;
+  endpointHost: string | null;
+  detail: string;
+  candidates: AgentCandidate[];
+};
+
+export type AgentMessage = { role: "system" | "user" | "assistant"; content: string };
+
+export type AgentCallFailureCode = "UNREACHABLE" | "TIMEOUT" | "HTTP_ERROR" | "EMPTY_RESPONSE";
+
+export type AgentChatResult =
+  | { ok: true; content: string; latencyMs: number; backend: AgentBackend }
+  | { ok: false; code: AgentCallFailureCode; error: string; httpStatus?: number; latencyMs: number; backend: AgentBackend };
+
+const DEFAULT_HOSTED_MODEL = "gpt-4o-mini";
+
+/** Hosted fallback is optional; the room works with the project worker alone. */
+export function hostedFallbackConfigured(): boolean {
+  return !!process.env.OPENAI_API_KEY?.trim();
+}
+
+function timeoutMs(): number {
+  const raw = parseInt(process.env.AGENT_TIMEOUT_MS ?? "120000", 10);
+  if (!Number.isFinite(raw)) return 120_000;
+  return Math.max(5_000, Math.min(300_000, raw));
+}
+
+function maxTokens(): number {
+  const raw = parseInt(process.env.AGENT_MAX_TOKENS ?? "900", 10);
+  if (!Number.isFinite(raw)) return 900;
+  return Math.max(64, Math.min(8192, raw));
+}
+
+export function endpointHost(endpoint: string | null | undefined): string | null {
+  if (!endpoint) return null;
+  try {
+    return new URL(endpoint).host;
+  } catch {
+    return null;
+  }
+}
+
+function hostedBackend(): AgentBackend {
+  const base = (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+  return {
+    kind: "hosted_fallback",
+    provider: "openai",
+    model: (process.env.OPENAI_CHAT_MODEL ?? DEFAULT_HOSTED_MODEL).trim() || DEFAULT_HOSTED_MODEL,
+    endpoint: base,
+    endpointHost: endpointHost(base),
+    workerId: null,
+  };
+}
+
+/**
+ * Pick the backend for one call. Reads Supabase live — a worker that stopped heartbeating is
+ * reported OFFLINE by `workerDisplayHealth`, so it is never chosen.
+ */
+export async function resolveAgentBackend(
+  supa: SupabaseClient
+): Promise<{ backend: AgentBackend | null; status: AgentBackendStatus }> {
+  const candidates: AgentCandidate[] = [];
+  const { data, error } = await supa
+    .from("workers")
+    .select("id, type, runtime, provider, model, status, endpoint, last_heartbeat_at, heartbeat_timeout_sec, error, error_code, error_message")
+    .eq("type", "script");
+
+  const rows = (data ?? []) as Array<WorkerHealthRow & { type?: string }>;
+  const online = rows
+    .map((row) => ({ row, health: workerDisplayHealth(row) }))
+    .filter(({ health }) => health.status === "ONLINE");
+
+  for (const { row, health } of online) {
+    candidates.push({
+      workerId: (row.id as string) ?? null,
+      provider: row.provider ?? "script",
+      status: "ONLINE",
+      reason: health.reason ?? "heartbeat fresh",
+      endpointHost: endpointHost(row.endpoint ?? null),
+    });
+  }
+  for (const row of rows) {
+    const health = workerDisplayHealth(row);
+    if (health.status === "ONLINE") continue;
+    candidates.push({
+      workerId: (row.id as string) ?? null,
+      provider: row.provider ?? "script",
+      status: health.status,
+      reason: health.reason ?? "not available",
+      endpointHost: endpointHost(row.endpoint ?? null),
+    });
+  }
+
+  // Prefer a live project worker with a reachable endpoint registered.
+  const usable = online.find(({ row }) => typeof row.endpoint === "string" && row.endpoint.trim().length > 0);
+  if (usable) {
+    const endpoint = usable.row.endpoint!.trim().replace(/\/+$/, "");
+    const backend: AgentBackend = {
+      kind: "project_worker",
+      provider: usable.row.provider ?? "kaggle",
+      model: usable.row.model ?? "Qwen/Qwen3-1.7B",
+      endpoint,
+      endpointHost: endpointHost(endpoint),
+      workerId: (usable.row.id as string) ?? null,
+    };
+    return {
+      backend,
+      status: {
+        available: true,
+        kind: backend.kind,
+        provider: backend.provider,
+        model: backend.model,
+        endpointHost: backend.endpointHost,
+        detail: `Script AI is ONLINE (${healthSummary(usable.row)}) at ${backend.endpointHost} — this is the project's own model.`,
+        candidates,
+      },
+    };
+  }
+
+  if (hostedFallbackConfigured()) {
+    const backend = hostedBackend();
+    return {
+      backend,
+      status: {
+        available: true,
+        kind: backend.kind,
+        provider: backend.provider,
+        model: backend.model,
+        endpointHost: backend.endpointHost,
+        detail:
+          rows.length === 0 && !error
+            ? "No Script AI worker is registered, so the configured hosted fallback model answers."
+            : "No Script AI worker is ONLINE, so the configured hosted fallback model answers.",
+        candidates,
+      },
+    };
+  }
+
+  const reason = error
+    ? `the worker registry could not be read (${error.message})`
+    : rows.length === 0
+      ? "no Script AI worker is registered yet — start the Kaggle runtime so the project's own model comes ONLINE"
+      : "no Script AI worker is ONLINE (heartbeat expired or endpoint missing)";
+  return {
+    backend: null,
+    status: {
+      available: false,
+      kind: null,
+      provider: null,
+      model: null,
+      endpointHost: null,
+      detail: `${reason}. Add OPENAI_API_KEY on the backend if you want a hosted fallback to answer instead.`,
+      candidates,
+    },
+  };
+}
+
+function healthSummary(row: WorkerHealthRow): string {
+  const h = workerDisplayHealth(row);
+  const age = h.heartbeatAgeSec;
+  return age == null ? "no heartbeat" : `heartbeat ${age}s ago`;
+}
+
+function readContent(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const choices = (payload as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || choices.length === 0) return null;
+  const first = choices[0] as { message?: { content?: unknown }; text?: unknown };
+  const fromMessage = first?.message?.content;
+  if (typeof fromMessage === "string" && fromMessage.trim()) return fromMessage;
+  if (typeof first?.text === "string" && first.text.trim()) return first.text;
+  // Some minimal servers return the raw string in `response`.
+  const alt = (payload as { response?: unknown }).response;
+  if (typeof alt === "string" && alt.trim()) return alt;
+  return null;
+}
+
+/** Call the resolved backend once. Every failure path reports what actually happened. */
+export async function callAgent(
+  backend: AgentBackend,
+  messages: AgentMessage[],
+  opts: { temperature?: number } = {}
+): Promise<AgentChatResult> {
+  const started = Date.now();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    // ngrok serves an interstitial HTML page to browser-like clients; this header skips it so the
+    // worker's JSON API is reachable from the backend.
+    "ngrok-skip-browser-warning": "1",
+  };
+  let body: Record<string, unknown>;
+
+  if (backend.kind === "hosted_fallback") {
+    const key = process.env.OPENAI_API_KEY?.trim();
+    if (!key) {
+      return {
+        ok: false,
+        code: "UNREACHABLE",
+        error: "OPENAI_API_KEY is not configured on the backend",
+        latencyMs: 0,
+        backend,
+      };
+    }
+    headers["Authorization"] = `Bearer ${key}`;
+    body = {
+      model: backend.model,
+      messages,
+      temperature: opts.temperature ?? 0.4,
+      max_tokens: maxTokens(),
+      stream: false,
+      response_format: { type: "json_object" },
+    };
+  } else {
+    body = {
+      model: backend.model,
+      messages,
+      temperature: opts.temperature ?? 0.4,
+      max_tokens: maxTokens(),
+      stream: false,
+    };
+  }
+
+  const url = backend.kind === "hosted_fallback" ? `${backend.endpoint}/chat/completions` : `${backend.endpoint}/v1/chat/completions`;
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs()),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const timedOut = /abort|timeout/i.test(msg);
+    return {
+      ok: false,
+      code: timedOut ? "TIMEOUT" : "UNREACHABLE",
+      error: `${timedOut ? "timed out" : "could not be reached"}: ${msg}`,
+      latencyMs: Date.now() - started,
+      backend,
+    };
+  }
+
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    return {
+      ok: false,
+      code: "HTTP_ERROR",
+      error: `HTTP ${res.status}${text ? `: ${text.slice(0, 300)}` : ""}`,
+      httpStatus: res.status,
+      latencyMs: Date.now() - started,
+      backend,
+    };
+  }
+
+  let json: unknown = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    return {
+      ok: false,
+      code: "HTTP_ERROR",
+      error: `response was not JSON: ${text.slice(0, 200)}`,
+      latencyMs: Date.now() - started,
+      backend,
+    };
+  }
+
+  const content = readContent(json);
+  if (!content) {
+    return {
+      ok: false,
+      code: "EMPTY_RESPONSE",
+      error: "the model returned no message content",
+      latencyMs: Date.now() - started,
+      backend,
+    };
+  }
+  return { ok: true, content, latencyMs: Date.now() - started, backend };
+}
+
+/** Client-safe projection of a backend (never the endpoint URL). */
+export function publicBackend(backend: AgentBackend): {
+  kind: AgentBackendKind;
+  provider: string;
+  model: string;
+  endpointHost: string | null;
+} {
+  return {
+    kind: backend.kind,
+    provider: backend.provider,
+    model: backend.model,
+    endpointHost: backend.endpointHost,
+  };
+}

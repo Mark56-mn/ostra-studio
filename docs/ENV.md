@@ -138,11 +138,12 @@ The push only **requests** a run. The notebook itself must then register and kee
 ## Supabase setup (once)
 
 1. Create project at https://supabase.com
-2. Run **all four** migrations in SQL editor (idempotent, in order):
+2. Run **all five** migrations in SQL editor (idempotent, in order):
    - `supabase/migrations/001_initial.sql`
    - `supabase/migrations/002_runtime_supervisor.sql`
    - `supabase/migrations/003_runtime_supervisor_extensions.sql`
    - `supabase/migrations/004_model_controls.sql` (per-model on/off switches → `/api/models` + `/models`)
+   - `supabase/migrations/005_conversations.sql` (Agent Chat rooms + messages → `/api/chat/*` + `/chat`)
 3. Create Storage bucket `ostra-assets` (private with signed URLs or public — your call)
 4. Copy URL + anon key + service_role key into the Render env as above
 

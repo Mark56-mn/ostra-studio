@@ -77,6 +77,76 @@ PATCH /api/models/:key       → body { enabled: boolean, note?: string }  → {
   `runtime_startup_history.result = 'skipped_disabled'` / `error_code = MODEL_DISABLED`.
 - Fail-open: if `model_controls` does not exist yet the supervisor logs the read error and allows the run.
 
+### Agent Chat — `GET|POST /api/chat/rooms` · `/api/chat/rooms/:id/messages` · `/api/chat/store`
+
+Backed by the `chat_rooms` + `chat_messages` tables (migration `005_conversations.sql`). A room is the
+transcript between the human director and the Script AI; the AI can also write to the store.
+
+```
+GET   /api/chat/rooms                 → { rooms: [{ id, project_id, title, created_at, updated_at }], timestamp }
+POST  /api/chat/rooms                 → body { project_id?: uuid|null, title?: string } → 201 { room }
+PATCH /api/chat/rooms/:id             → body { project_id?: uuid|null, title?: string } → { room }
+GET   /api/chat/rooms/:id/messages    → { room, messages: [...], agent: <AgentStatus>, timestamp }
+POST  /api/chat/rooms/:id/messages    → body { content: string, note?: string } (≤ 8000 chars)
+GET   /api/chat/store?projectId=      → { projects: [{id,slug,title}], snapshot }
+```
+
+`POST …/messages` is one turn: the human message is stored **first**, then the model is called with the live
+store snapshot in its system prompt, then the requested store writes are applied, then the assistant row is
+written with what actually changed. Response:
+
+```jsonc
+{
+  "user_message": { "id": "…", "role": "user", "content": "…" },
+  "message": { "id": "…", "role": "assistant", "content": "…",
+               "actions": [ { "op": "create_character", "ok": true, "entity": "character",
+                              "ref": "character:Kai", "id": "…", "summary": "Created character \"Kai\"" } ],
+               "backend": { "kind": "project_worker", "provider": "kaggle", "model": "Qwen/Qwen3-1.7B",
+                            "endpointHost": "…ngrok.app", "latencyMs": 4200, "parse": "json" } },
+  "applied": [ … ], "store": { "changed": 1, "failed": 0 },
+  "backend": { … }, "agent": { … }, "rejected": [ "delete_scene" ]
+}
+```
+
+Failure codes are truthful and never accompanied by an invented answer:
+- `503 { error: "NO_AGENT_BACKEND", reason, user_message, agent }` — no worker ONLINE and no hosted key.
+  The human message is still saved; no assistant row is written.
+- `502 { error: "UNREACHABLE"|"TIMEOUT"|"HTTP_ERROR"|"EMPTY_RESPONSE", reason, user_message, backend, agent }`
+  — the backend was chosen but the call failed. Again: no assistant row, no placeholder text.
+- `503 { error: "Supabase not configured", reason, hint }` — as everywhere else in this API.
+
+Which real model answers (`apps/api/src/lib/agentRuntime.ts`):
+1. **Project worker (preferred, no key needed)** — the `script` worker that `workerDisplayHealth` reports
+   ONLINE (fresh heartbeat) and that registered an `endpoint`. Called at `{endpoint}/v1/chat/completions`
+   (OpenAI-shaped, what the Kaggle notebook serves) with the `ngrok-skip-browser-warning` header.
+2. **Hosted fallback (optional)** — `POST {OPENAI_BASE_URL}/chat/completions` with `OPENAI_API_KEY`, used
+   only when no project worker is ONLINE. `OPENAI_BASE_URL` also lets any OpenAI-compatible server stand in.
+3. **Nothing** — reported honestly as above.
+
+Agent behaviour (`packages/shared/src/agent/protocol.ts`): the model must answer with one JSON object
+`{ "reply": "…", "actions": [ … ] }`. `parseAgentResponse` tolerates fenced JSON, `action`/`arguments`
+aliases and flattened arguments, falls back to treating the whole answer as prose (`parse: "text_fallback"`),
+and reports any op outside the allow-list in `rejected`. The allow-list is **additive only** — there is no
+delete op, so chat can never destroy a row or an artifact. Store writes go through the same column
+allow-lists as the REST routes (`apps/api/src/lib/storeActions.ts`) and each success inserts an
+`events` row of type `agent.store_change`.
+
+Extra env vars (all optional — the room works with the project's own worker alone):
+
+```bash
+# Hosted fallback used ONLY when no Script AI worker is ONLINE. Add on Render to enable it.
+OPENAI_API_KEY=
+OPENAI_CHAT_MODEL=gpt-4o-mini          # default
+OPENAI_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible server
+# Turn budget (clamped): 5s..300s, 64..8192 tokens
+AGENT_TIMEOUT_MS=120000
+AGENT_MAX_TOKENS=900
+```
+
+The dashboard page is `/chat` (nav: **Agent Chat**): transcript + composer on the left, rooms and the live
+store panel on the right. The transcript polls every 3s and the store panel every 6s, so a change made in
+another tab shows up without a reload.
+
 ### Kaggle auto-start (real, not probe-only) — `KaggleRuntimeStarter`
 
 `GET /api/v1/kernels/list?pageSize=1` (auth gate) → `GET /api/v1/kernels/pull?user_name={owner}&kernel_slug={slug}` (kernel source + `metadata.currentVersionNumber`) → `POST /api/v1/kernels/push` via `ApiSaveKernelRequest{ slug, newTitle, text, language, kernelType, isPrivate, enableInternet, enableGpu/Tpu, … }` → `ApiSaveKernelResponse{ versionNumber, url, ref }` → `provider_run_id = ref@vN` (`bettertrade/notebook7eae283a4a@vN`). A bare `notebook7eae283a4a` is resolved via `resolveKaggleKernelRef()` → `GET /api/v1/kernels/list?group=profile&search=`; a ref with a slash bypasses that search. `/api/v1/kernels/list` rejects `mine=true` (HTTP 400) and `GET /api/v1/kernels/{owner}/{slug}` returns the HTML site page (404), so neither is used any more. `KGAT_*` tokens authenticate as `Bearer`. The push reply's `ref` is the **site form** `"/code/owner/slug"` (verified live), so `canonicalizeKernelRef()` normalizes it back to `owner/slug` before building `provider_run_id = owner/slug@vN` (the raw value is kept as `provider_response.providerRef`). If the kernel source cannot be read the starter fails with the real HTTP status and never calls push. Read-only credential check: `bun run verify:kaggle --kernel-ref=bettertrade/notebook7eae283a4a`. A push only *requests* a run: ONLINE additionally requires the notebook's bootstrap cell (`scripts/kaggle-worker-bootstrap.py`) to register and heartbeat — keep the live notebook in sync with `bun run sync:notebook --apply`.
@@ -89,6 +159,8 @@ Supabase migrations (run once, idempotent, in order):
 - `supabase/migrations/001_initial.sql`
 - `supabase/migrations/002_runtime_supervisor.sql`
 - `supabase/migrations/003_runtime_supervisor_extensions.sql`
+- `supabase/migrations/004_model_controls.sql`
+- `supabase/migrations/005_conversations.sql` (Agent Chat rooms + messages)
 
 Storage bucket: `ostra-assets`
 
