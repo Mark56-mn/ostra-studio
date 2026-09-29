@@ -7,7 +7,7 @@ import { Card, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { AgentRoom, type AgentRow } from "@/components/AgentRoom";
 import { Pipeline } from "@/components/Pipeline";
-import type { PipelineStep } from "@ostra/shared";
+import { resolveProjectSlug, type PipelineStep } from "@ostra/shared";
 
 type Project = { id:string; slug:string; title:string; logline?:string|null; created_at:string };
 type Episode = { id:string; project_id:string; number:number; title:string; status:string; concept?:string|null; created_at:string };
@@ -25,6 +25,7 @@ export default function ProjectsPage() {
   const [err, setErr] = useState<string | null>(null);
 
   const [slug, setSlug] = useState(""); const [title, setTitle] = useState(""); const [logline, setLogline] = useState("");
+  const [slugTouched, setSlugTouched] = useState(false);
   const [epTitle, setEpTitle] = useState(""); const [epConcept, setEpConcept] = useState("");
 
   async function loadProjects() {
@@ -57,9 +58,10 @@ export default function ProjectsPage() {
 
   async function createProject(e: React.FormEvent) {
     e.preventDefault();
-    const r = await fetch(apiUrl("/api/projects"), { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ slug, title, logline }) });
+    // Send a normalized slug (or none — the API derives one from the title). Never an invalid value.
+    const r = await fetch(apiUrl("/api/projects"), { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ slug: resolveProjectSlug(slug, title), title, logline }) });
     const j = await r.json();
-    if (!r.ok) setErr(j.error); else { setSlug(""); setTitle(""); setLogline(""); loadProjects(); }
+    if (!r.ok) setErr(j.error); else { setSlug(""); setTitle(""); setLogline(""); setSlugTouched(false); setErr(null); loadProjects(); }
   }
   async function createEpisode(e: React.FormEvent) {
     e.preventDefault();
@@ -102,8 +104,9 @@ export default function ProjectsPage() {
 
               <form onSubmit={createProject} className="mt-4 space-y-2 rounded-xl border border-white/[0.06] bg-[#0F1425] p-3">
                 <div className="label-mono text-[#6B7594]">NEW PROJECT</div>
-                <input value={slug} onChange={e=>setSlug(e.target.value)} placeholder="slug — e.g. crimson-ink" className="w-full rounded-lg border border-white/10 bg-[#070A14] px-3 py-2 text-[13px] text-white placeholder:text-zinc-500" />
-                <input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Title — e.g. Crimson Ink" className="w-full rounded-lg border border-white/10 bg-[#070A14] px-3 py-2 text-[13px] text-white placeholder:text-zinc-500" />
+                <input value={title} onChange={e=>{ setTitle(e.target.value); if(!slugTouched) setSlug(resolveProjectSlug("", e.target.value)); }} placeholder="Title — e.g. Crimson Ink" className="w-full rounded-lg border border-white/10 bg-[#070A14] px-3 py-2 text-[13px] text-white placeholder:text-zinc-500" />
+                <input value={slug} onChange={e=>{ setSlugTouched(true); setSlug(e.target.value); }} placeholder="slug (optional) — auto from title" className="w-full rounded-lg border border-white/10 bg-[#070A14] px-3 py-2 text-[13px] text-white placeholder:text-zinc-500" />
+                <div className="text-[11px] leading-4 text-[#6B7594]">Slug is normalized to lowercase a-z, 0-9 and hyphens. Leave it blank and it follows the title.</div>
                 <input value={logline} onChange={e=>setLogline(e.target.value)} placeholder="Logline (optional)" className="w-full rounded-lg border border-white/10 bg-[#070A14] px-3 py-2 text-[13px] text-white placeholder:text-zinc-500" />
                 <button type="submit" className="w-full rounded-full bg-white px-4 py-2 text-[13px] font-semibold text-[#070A14] hover:bg-zinc-100">Create project</button>
                 <div className="text-[11px] leading-4 text-[#6B7594]">Render API: <span className="font-mono">POST /api/projects</span> → Supabase. Vercel never holds secrets.</div>

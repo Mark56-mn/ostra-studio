@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { isDueNow } from "@ostra/shared";
 import { findWorkerByTypeRuntime, isHealthyWorker } from "./workerHealth.js";
 import { tryAcquireLease, releaseLease } from "./lease.js";
+import { checkModelDisabled } from "./modelControls.js";
 import { KaggleRuntimeStarter, ColabImageRuntimeStarter, ColabVoiceRuntimeStarter, findStarter, resolveRuntimeStarters, redactSecrets } from "@ostra/shared";
 import type { RuntimeStartOutcome } from "@ostra/shared";
 
@@ -55,6 +56,23 @@ async function evaluateAndStart(
     });
     await emit(supa, "scheduler.skipped_not_autostartable", null, { schedule_id: scheduleId, worker_type, runtime });
     return { action: "not_autostartable", historyId: h?.id as string | undefined };
+  }
+
+  // 0.5) Model switch guard — the operator can switch a model off in the dashboard. A switched-off
+  // model is never started, and the refusal is recorded as exactly that: not a failure, not a fake
+  // success. This is the only place the orchestrator starts an external runtime.
+  const switchState = await checkModelDisabled(supa, worker_type);
+  if (switchState.disabled) {
+    const h = await insertHistory(supa, {
+      schedule_id: scheduleIdForFk, worker_type, runtime, provider,
+      trigger_source: forHistorySource, startup_request_id: preRequestId,
+      provider_run_id: null, provider_response: null,
+      result: "skipped_disabled", status: "CANCELLED",
+      error: `Model "${worker_type}" is switched off in the dashboard (Models)`,
+      error_code: "MODEL_DISABLED",
+    });
+    await emit(supa, "scheduler.skipped_model_disabled", null, { schedule_id: scheduleId, worker_type, runtime, reason: "model_disabled" });
+    return { action: "skipped_disabled", historyId: h?.id as string | undefined };
   }
 
   // 1) Is worker already healthy? → skip (Case A)
@@ -307,6 +325,21 @@ export async function runNow(supa: SupabaseClient, scheduleId: string): Promise<
 
 // Run Now by (worker_type, runtime) when the user doesn't have a schedule yet (ad-hoc).
 export async function runNowByWorker(supa: SupabaseClient, worker_type: string, runtime: string, provider: string): Promise<{ action: string; historyId?: string; error?: string }> {
+  // Model switch guard — Run Now obeys the same on/off switches as the scheduler.
+  const switchState = await checkModelDisabled(supa, worker_type);
+  if (switchState.disabled) {
+    const h = await insertHistory(supa, {
+      schedule_id: null, worker_type, runtime, provider,
+      trigger_source: "run_now", startup_request_id: `req:${Date.now().toString(36)}`,
+      provider_run_id: null, provider_response: null,
+      result: "skipped_disabled", status: "CANCELLED",
+      error: `Model "${worker_type}" is switched off in the dashboard (Models)`,
+      error_code: "MODEL_DISABLED",
+    });
+    await emit(supa, "scheduler.skipped_model_disabled", null, { worker_type, runtime, trigger_source: "run_now", reason: "model_disabled" });
+    return { action: "skipped_disabled", historyId: h?.id as string | undefined };
+  }
+
   // Ephemeral config for an ad-hoc run (no persisted schedule row) — never persisted as a fake schedule.
   const adHocConfig: Record<string, unknown> = {
     id: `run_now:${worker_type}:${runtime}`,

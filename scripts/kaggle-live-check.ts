@@ -151,22 +151,56 @@ async function main(): Promise<number> {
     } else {
       console.log(`  GET ${outUrl} -> HTTP ${outRes.status}`);
       if (outRes.ok) {
-        const oj = (await outRes.json().catch(() => null)) as { files?: Array<{ name?: string; size?: number; url?: string }> } | null;
+        const oj = (await outRes.json().catch(() => null)) as {
+          files?: Array<{ name?: string; size?: number; url?: string }>;
+          logNullable?: string;
+          log?: unknown;
+        } | null;
         const files = oj?.files ?? [];
         console.log(`  output files: ${files.length}`);
         for (const f of files.slice(0, 20)) console.log(`    - ${String(f.name)} (${String(f.size ?? "?")} bytes)`);
         for (const f of files) {
           if (!f.url || !/\.(ipynb|json|txt|log)$/.test(String(f.name))) continue;
           const txt = await fetch(f.url, { signal: AbortSignal.timeout(25000) }).then((r) => r.text()).catch(() => "");
-          const lines = txt.split("\n").filter((l) => l.includes("[ostra]")).slice(0, 40);
-          if (lines.length) {
+          const ostraLines = txt.split("\n").filter((l) => l.includes("[ostra]")).slice(0, 40);
+          if (ostraLines.length) {
             console.log(`\n  [ostra] bootstrap lines from ${String(f.name)}:`);
-            for (const l of lines) console.log(`    ${l.replace(/\\n/g, " ").trim().slice(0, 220)}`);
+            for (const l of ostraLines) console.log(`    ${l.replace(/\\n/g, " ").trim().slice(0, 220)}`);
           }
+        }
+
+        // The run's own stdout/stderr comes back inline as a JSON string. This is the only reliable
+        // way to see WHY a version did or did not reach the bootstrap cell: a run that aborts early
+        // writes no output files at all, so "0 output files" alone hides the real reason.
+        const rawLog = typeof oj?.logNullable === "string" ? oj.logNullable : typeof oj?.log === "string" ? oj.log : null;
+        let entries: Array<{ data?: string; stream_name?: string }> = [];
+        if (rawLog) {
+          try {
+            entries = JSON.parse(rawLog) as Array<{ data?: string; stream_name?: string }>;
+          } catch {
+            entries = [];
+          }
+        }
+        console.log(`\n  run log entries: ${entries.length} (real stdout/stderr of the last run)`);
+        if (entries.length) {
+          const seen = new Set<string>();
+          const interesting: string[] = [];
+          for (const e of entries) {
+            const line = String(e.data ?? "").replace(/\s+/g, " ").trim();
+            if (!line) continue;
+            if (!/\[ostra\]|PapermillExecutionError|Exception encountered at|Connection refused|Address already in use|ModuleNotFoundError|ngrok tunnel FAILED|OSTRA API STARTED|Uvicorn running|did not answer within/.test(line)) continue;
+            if (seen.has(line)) continue;
+            seen.add(line);
+            interesting.push(line);
+            if (interesting.length >= 60) break;
+          }
+          for (const line of interesting) console.log(`    ${line.slice(0, 220)}`);
+          const abortAt = entries.map((e) => String(e.data ?? "")).find((d) => d.includes("Exception encountered at"));
+          if (abortAt) console.log(`  ABORT POINT: ${abortAt.replace(/\s+/g, " ").trim()}`);
         }
       }
     }
-    console.log("  NOTE: no output yet means the run has not finished (or has not started).");
+    console.log("  NOTE: an empty run log means the run has not produced output yet (queued or still running).");
   }
 
   // ── 4. Optional real push ──────────────────────────────────────────────────

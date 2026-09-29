@@ -3,7 +3,7 @@
 Set these on Render (Environment tab). `SUPABASE_SERVICE_ROLE_KEY` is server-only — never set it as `NEXT_PUBLIC_*`.
 
 ```
-# Supabase (required — migrations 001 + 002 + 003)
+# Supabase (required — migrations 001 + 002 + 003 + 004)
 SUPABASE_URL=https://xxx.supabase.co
 # aliases accepted:
 SUPABASE_CONNECTION_STRING=https://xxx.supabase.co
@@ -54,6 +54,28 @@ YOUTUBE_REDIRECT_URI=
 AUTO_PUBLISH=false
 PORT=3001
 ```
+
+### Model switches — `GET /api/models` / `PATCH /api/models/:key`
+
+Backed by the `model_controls` table (migration `004_model_controls.sql`). No new env vars.
+
+```
+GET   /api/models            → { models: [{ key, providerId, modelRef, label, provider, runtime,
+                                            enabled, dispatch, health, note, updatedAt, updatedBy }],
+                                 counts: { total, enabled, disabled, ready }, source: "supabase", timestamp }
+PATCH /api/models/:key       → body { enabled: boolean, note?: string }  → { model, changed, actor }
+```
+
+- Catalog keys live in `packages/shared/src/providers/models.ts`: `script-qwen3-1-7b`, `image-colab-image`,
+  `voice-kokoro-82m`, `video-ffmpeg`, `youtube-youtube-api`. Unknown key → `404` + `known`; non-boolean
+  `enabled` → `400`; Supabase unreadable → `503` + `reason` (never a list that assumes "all on").
+- `dispatch` is derived, not stored: `READY` = switch ON **and** `health.status === "ONLINE"`.
+  The switch never changes `health` — switching a model off cannot make it look ONLINE, and switching it
+  on cannot make it look usable.
+- Enforced in `apps/api/src/lib/scheduler.ts` (`schedulerTick` + `runNowByWorker`, the only paths that
+  start an external runtime): a switched-off model returns `skipped_disabled` and records
+  `runtime_startup_history.result = 'skipped_disabled'` / `error_code = MODEL_DISABLED`.
+- Fail-open: if `model_controls` does not exist yet the supervisor logs the read error and allows the run.
 
 ### Kaggle auto-start (real, not probe-only) — `KaggleRuntimeStarter`
 

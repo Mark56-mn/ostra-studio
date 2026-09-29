@@ -27,6 +27,135 @@ const KAGGLE_API = "https://www.kaggle.com/api/v1";
 const BOOTSTRAP_MARKER = "# ── Ostra Studio worker bootstrap (managed cell) ──";
 const BOOTSTRAP_PATH = new URL("./kaggle-worker-bootstrap.py", import.meta.url).pathname;
 
+/**
+ * The notebook once shelled out to a Django dev server (`python manage.py runserver 8000`). There is
+ * no manage.py in this notebook, port 8000 is already served by the FastAPI app started earlier, so
+ * that command could only fail — and it sits *before* the tunnel and bootstrap cells. Retire it.
+ */
+const RETIRED_CELL_SOURCE = [
+  "# ── retired cell (managed by scripts/kaggle-sync-notebook.ts) ──",
+  "# This cell used to shell out to a Django dev server that does not exist in this notebook, on a",
+  "# port already served by the FastAPI app started earlier. The dead command could only fail before",
+  "# the tunnel and bootstrap cells ran, so it was retired.",
+  'print("[ostra] retired the dead Django dev-server cell — FastAPI on :8000 is the real API")',
+].join("\n");
+
+const isRetiredCell = (source: string): boolean => source.includes("manage.py") && source.includes("runserver");
+
+/**
+ * Cells that must exist *before* the tunnel/bootstrap and must never abort the run.
+ *
+ * Verified against a real run log (2026-09-29, v9): cell 9 starts uvicorn in a background thread
+ * and returns immediately, cell 10 then did `requests.get("http://127.0.0.1:8000/health")` before the
+ * port was bound. That raised ConnectionRefusedError, papermill aborted the notebook at `In [10]`,
+ * and cells 12-15 (pyngrok, the ngrok tunnel, the worker bootstrap) never executed — which is why
+ * Script AI had never registered. Diagnostics must report, not abort.
+ */
+const MANAGED_PRE_TUNNEL_CELLS: Array<{ label: string; detect: (s: string) => boolean; content: string }> = [
+  {
+    label: "local API readiness check",
+    detect: (s) => s.includes("127.0.0.1:8000/health") && s.includes("requests.get"),
+    content: [
+      "# ── Ostra Studio: local API readiness check (managed cell) ──",
+      "# The FastAPI server above runs in a background thread and needs a moment before the port",
+      "# accepts connections. Requesting it straight away used to raise ConnectionRefused and abort",
+      "# the whole run, so the ngrok tunnel + worker bootstrap cells never ran. This waits for the",
+      "# server, prints the real response, and never raises.",
+      "import json",
+      "import time",
+      "",
+      "import requests",
+      "",
+      'URL = "http://127.0.0.1:8000/health"',
+      "DEADLINE = time.time() + 90",
+      "ready = False",
+      "response = None",
+      "while time.time() < DEADLINE:",
+      "    try:",
+      "        response = requests.get(URL, timeout=5)",
+      "        ready = True",
+      "        break",
+      "    except Exception as exc:",
+      '        print(f"[ostra] {URL} not ready yet ({exc.__class__.__name__}) — retrying")',
+      "        time.sleep(3)",
+      "",
+      "if ready:",
+      '    print("Status:", response.status_code)',
+      "    print(json.dumps(response.json(), indent=2))",
+      "else:",
+      '    print("[ostra] local API did not answer within 90s — continuing anyway (tunnel + bootstrap still run)")',
+    ].join("\n"),
+  },
+  {
+    label: "local chat smoke test",
+    detect: (s) => s.includes("127.0.0.1:8000/v1/chat/completions"),
+    content: [
+      "# ── Ostra Studio: local chat smoke test (managed cell) ──",
+      "# Diagnostic only — it must never abort the run, because the tunnel + worker bootstrap cells",
+      "# come after it and papermill stops the notebook on the first uncaught exception.",
+      "import json",
+      "",
+      "import requests",
+      "",
+      "payload = {",
+      '    "model": "Qwen/Qwen3-1.7B",',
+      '    "messages": [{"role": "user", "content": "Give me a one sentence introduction to Ostra."}],',
+      '    "temperature": 0.7,',
+      '    "max_tokens": 150,',
+      '    "stream": False,',
+      "}",
+      "",
+      "try:",
+      '    response = requests.post("http://127.0.0.1:8000/v1/chat/completions", json=payload, timeout=240)',
+      '    print("HTTP:", response.status_code)',
+      "    print(json.dumps(response.json(), indent=2))",
+      "except Exception as exc:",
+      '    print(f"[ostra] local chat test failed ({exc.__class__.__name__}: {exc}) — continuing anyway")',
+    ].join("\n"),
+  },
+  {
+    label: "ngrok tunnel",
+    detect: (s) => s.includes("ngrok.connect("),
+    content: [
+      "# ── Ostra Studio: public tunnel via ngrok (managed cell) ──",
+      "# Opens the public URL the Ostra backend will reach. If ngrok fails, this reports it and keeps",
+      "# going with PUBLIC_URL = None instead of aborting the run before the worker bootstrap cell.",
+      'from kaggle_secrets import UserSecretsClient',
+      "from pyngrok import ngrok",
+      "",
+      'PUBLIC_URL = globals().get("PUBLIC_URL") or None',
+      "",
+      "try:",
+      "    secrets = UserSecretsClient()",
+      '    token = secrets.get_secret("NGROK_AUTHTOKEN")',
+      "    ngrok.set_auth_token(token)",
+      '    print("Ngrok authentication successful.")',
+      "    tunnel = ngrok.connect(8000)",
+      "    PUBLIC_URL = tunnel.public_url",
+      '    print("Ostra PUBLIC API:")',
+      "    print(PUBLIC_URL)",
+      '    print("\\nHealth:")',
+      '    print(PUBLIC_URL + "/health")',
+      '    print("\\nChat:")',
+      '    print(PUBLIC_URL + "/v1/chat/completions")',
+      "except Exception as exc:",
+      "    PUBLIC_URL = None",
+      '    print(f"[ostra] ngrok tunnel FAILED ({exc.__class__.__name__}: {exc}) — no public URL")',
+      '    print("[ostra] Script AI can still register, but it will have no reachable endpoint.")',
+    ].join("\n"),
+  },
+];
+
+function codeCell(source: string) {
+  return {
+    cell_type: "code",
+    execution_count: null,
+    metadata: {},
+    outputs: [],
+    source: source.split("\n").map((line, i, all) => (i === all.length - 1 ? line : `${line}\n`)),
+  };
+}
+
 const mode = process.argv.includes("--apply") ? "apply" : process.argv.includes("--dump") ? "dump" : "dry-run";
 
 function presence(name: string, raw: string | undefined): string {
@@ -132,31 +261,46 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  // ── 2. Reconcile the managed bootstrap cell ────────────────────────────────
+  // ── 2. Reconcile every managed cell ────────────────────────────────────────
   const bootstrap = readFileSync(BOOTSTRAP_PATH, "utf8");
   const existingIndex = cells.findIndex((c) => cellSource(c).includes(BOOTSTRAP_MARKER));
-  const current = existingIndex >= 0 ? cellSource(cells[existingIndex]!) : null;
-  const inSync = current === bootstrap;
+  const bootstrapInSync = existingIndex >= 0 && cellSource(cells[existingIndex]!) === bootstrap;
+  const retiredIndexes = cells.map((c, i) => [i, cellSource(c)] as const).filter(([, s]) => isRetiredCell(s)).map(([i]) => i);
 
-  console.log("\n--- 2) Bootstrap reconciliation ---");
-  console.log(`  managed cell: ${existingIndex >= 0 ? `present at index ${existingIndex}` : "MISSING"}`);
-  console.log(`  in sync with scripts/kaggle-worker-bootstrap.py: ${inSync ? "yes" : "NO"}`);
+  const nextCells = [...cells];
+  const changes: string[] = [];
 
-  if (inSync) {
+  console.log("\n--- 2) Managed cell reconciliation ---");
+  console.log(`  bootstrap cell: ${existingIndex >= 0 ? `present at index ${existingIndex}` : "MISSING"} — in sync: ${bootstrapInSync ? "yes" : "NO"}`);
+
+  for (const rule of MANAGED_PRE_TUNNEL_CELLS) {
+    const idx = cells.findIndex((c) => rule.detect(cellSource(c)));
+    if (idx < 0) {
+      console.log(`  ${rule.label}: not present in this notebook — skipping`);
+      continue;
+    }
+    if (cellSource(cells[idx]!) === rule.content) {
+      console.log(`  ${rule.label}: in sync (cell ${idx})`);
+      continue;
+    }
+    nextCells[idx] = codeCell(rule.content);
+    changes.push(`${rule.label} (cell ${idx})`);
+  }
+
+  for (const i of retiredIndexes) {
+    nextCells[i] = codeCell(RETIRED_CELL_SOURCE);
+    changes.push(`retired dead Django cell (cell ${i})`);
+  }
+  if (!bootstrapInSync) changes.push(`bootstrap cell (index ${existingIndex >= 0 ? existingIndex : "appended"})`);
+
+  if (changes.length === 0) {
     console.log("\n  RESULT: ALREADY IN SYNC — no push needed.");
     return 0;
   }
+  console.log(`\n  changes to push: ${changes.join("; ")}`);
 
-  const nextCells = [...cells];
-  const bootstrapCell = {
-    cell_type: "code",
-    execution_count: null,
-    metadata: {},
-    outputs: [],
-    source: bootstrap.split("\n").map((line, i, all) => (i === all.length - 1 ? line : `${line}\n`)),
-  };
-  if (existingIndex >= 0) nextCells[existingIndex] = bootstrapCell;
-  else nextCells.push(bootstrapCell);
+  if (existingIndex >= 0) nextCells[existingIndex] = codeCell(bootstrap);
+  else nextCells.push(codeCell(bootstrap));
 
   const nextSource = JSON.stringify({ ...nb, cells: nextCells });
   console.log(`  next source: ${nextSource.length} chars (${nextSource.length - source.length >= 0 ? "+" : ""}${nextSource.length - source.length})`);

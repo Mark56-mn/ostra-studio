@@ -104,7 +104,7 @@ PORT=3001                                 # Render injects PORT; 3001 is the loc
   - `GET /api/v1/kernels/{owner}/{slug}` serves the **HTML site page** (HTTP 404, `text/html` for API clients). The notebook source must come from `/kernels/pull`.
   - `KGAT_*` tokens authenticate as `Bearer`, not Basic. Basic `username:key` is only for legacy keys.
 - If the source cannot be read, the starter fails with the real HTTP status and **never** calls push.
-- Verify credentials without starting a run: `bun run verify:kaggle --kernel-ref=bettertrade/notebook7eae283a4a` (add `--push` to start a real version). Add `--logs` to read the last run's `lastRunTime` and print its `[ostra]` bootstrap lines — the fastest way to see *why* a worker did or did not register (run output only exists once the run finishes).
+- Verify credentials without starting a run: `bun run verify:kaggle --kernel-ref=bettertrade/notebook7eae283a4a` (add `--push` to start a real version). Add `--logs` to print the last run's `lastRunTime`, its output files, **and the run log itself**: `GET /api/v1/kernels/output` returns the run's stdout/stderr inline in `logNullable`, so this is the fastest way to see *why* a worker did or did not register. This matters in practice — a version that aborts early writes **no output files at all**, so "0 output files" alone hides the real cause. `--logs` greps the log for `[ostra]` lines, `PapermillExecutionError`, `Exception encountered at` (the exact abort point) and tunnel/registration failures.
 - Quota/rate mapping: 401/403→`AUTH_FAILED`, 429→`RATE_LIMITED`, 402→`QUOTA_EXCEEDED`.
 
 ### Kaggle notebook bootstrap (what actually makes Script AI ONLINE)
@@ -113,14 +113,17 @@ The push only **requests** a run. The notebook itself must then register and kee
 `deriveProviderHealth()` never reports ONLINE from configuration or from a successful push.
 
 - Canonical cell: `scripts/kaggle-worker-bootstrap.py`, marked with `# ── Ostra Studio worker bootstrap (managed cell) ──`.
-- It reads two **Kaggle secrets** (Add-ons → Secrets):
-  - `WORKER_REGISTRATION_TOKEN` (**required**) — must equal the backend value.
+- It reads three **Kaggle secrets** (Add-ons → Secrets):
+  - `WORKER_REGISTRATION_TOKEN` (optional) — only needed when the backend sets it, and then it must match `WORKER_REGISTRATION_TOKEN` / `WORKER_REGISTRATION_SECRET` on Render. `registerWorker()` only demands a token when one is configured there; with none configured the API permits open (but still audited) registration, so the cell always attempts registration and reports the real status. A `401` is reported as "the backend requires a registration token", never masked.
   - `OSTRA_API_URL` (optional) — defaults to `https://ostra-studio-1.onrender.com`.
-- It registers via `POST /api/workers/register` (header `x-worker-token`), reporting
-  `endpoint = PUBLIC_URL` (the ngrok tunnel the notebook opens), then heartbeats
-  `POST /api/workers/heartbeat` every 30s — comfortably under `WORKER_HEARTBEAT_TIMEOUT_SEC=90`.
-  A 404 heartbeat re-registers instead of silently going dark.
-- If the token is missing the cell prints `NOT REGISTERED` and starts **no** heartbeat. It never fakes ONLINE.
+  - `OSTRA_KEEPALIVE_MINUTES` (optional) — how long the cell holds the runtime open (default `10`).
+- Order of work, each step reporting its real HTTP status:
+  1. `GET {PUBLIC_URL}/health` — the cell verifies its **own public tunnel** from inside the notebook (this is the "is the URL 200 OK?" check).
+  2. `POST /api/workers/register` with `endpoint = PUBLIC_URL` and `metadata.tunnel_health` carrying that check's real status, so `/api/workers` shows whether the tunnel answered.
+  3. `POST /api/workers/heartbeat` every 30s — comfortably under `WORKER_HEARTBEAT_TIMEOUT_SEC=90`. A 404 heartbeat re-registers instead of silently going dark.
+- It writes `ostra-status.json` + `ostra-bootstrap.log` into the working directory. A Kaggle version only publishes output files when the run **ends**, so this is the durable record of the run.
+- Keep-alive: a batch run ends when its last cell returns, which would kill the heartbeat thread and drop the worker to OFFLINE within the timeout. When registration succeeds the cell holds the runtime open for `OSTRA_KEEPALIVE_MINUTES` so Script AI is genuinely ONLINE, then ends cleanly so the version publishes its outputs. Raise it for longer uptime; it is capped at 720.
+- `bun run sync:notebook` also owns the cells in front of the tunnel: the local API readiness check (waits up to 90s for `:8000` instead of failing instantly), the local chat smoke test, and the ngrok tunnel cell. Verified against a real run log (2026-09-29): **papermill aborts the whole notebook at the first uncaught exception**, and the old `requests.get("http://127.0.0.1:8000/health")` fired before uvicorn had bound the port — the ngrok + bootstrap cells therefore never ran at all. Diagnostics must report, never abort. A dead `python manage.py runserver` cell is retired for the same reason.
 - Keep the live notebook in sync with the committed cell:
   `bun run sync:notebook` (dry run) → `bun run sync:notebook --apply` (pushes a **REAL** new kernel version).
   `bun run sync:notebook --dump [--dump-full]` reads the live cell structure without writing.
@@ -135,10 +138,11 @@ The push only **requests** a run. The notebook itself must then register and kee
 ## Supabase setup (once)
 
 1. Create project at https://supabase.com
-2. Run **all three** migrations in SQL editor (idempotent, in order):
+2. Run **all four** migrations in SQL editor (idempotent, in order):
    - `supabase/migrations/001_initial.sql`
    - `supabase/migrations/002_runtime_supervisor.sql`
    - `supabase/migrations/003_runtime_supervisor_extensions.sql`
+   - `supabase/migrations/004_model_controls.sql` (per-model on/off switches → `/api/models` + `/models`)
 3. Create Storage bucket `ostra-assets` (private with signed URLs or public — your call)
 4. Copy URL + anon key + service_role key into the Render env as above
 
@@ -172,6 +176,27 @@ Rules the code enforces:
 - `GET /api/providers` returns the identical envelope (one parser for the dashboard).
 - `GET /api/workers` returns the real registry rows with a derived `health` object, or `503` + `reason` when
   Supabase is not configured (there is no synthetic worker list).
+- `GET /api/models` returns every switchable AI model with its stored on/off switch **and** the real
+  derived `health`, or `503` + `reason` when Supabase cannot be read (never a list that assumes "all on").
+
+## Model switches (`/models` in the dashboard)
+
+Each AI model (Script/Qwen3, Image/Colab, Voice/Kokoro, Video/FFmpeg, YouTube) has one persisted switch
+in `model_controls`, flipped from the dashboard **Models** page or via `PATCH /api/models/:key`.
+
+- A model with **no stored row is ON** — the code default, so a fresh database needs no seeding.
+- The switch changes **intent only**. `health` is still the same real heartbeat/check state reported by
+  `/api/health`, so switching a model off never makes it look `ONLINE` and switching it on never makes
+  it usable. `dispatch` is the derived answer (`READY` = ON **and** `health.status === "ONLINE"`;
+  `NOT_READY` = ON but not usable; `DISABLED` = switched off).
+- Enforcement happens at the only two places an external runtime is started:
+  `schedulerTick()` and `runNowByWorker()` in `apps/api/src/lib/scheduler.ts`. A switched-off model is
+  refused and recorded as `runtime_startup_history.result = 'skipped_disabled'` (status `CANCELLED`,
+  `error_code = MODEL_DISABLED`) plus a `scheduler.skipped_model_disabled` event — never a fake start,
+  never a fake failure.
+- Every flip is audited as a `model.enabled` / `model.disabled` event with the actor.
+- If `model_controls` is missing (migration 004 not applied) the supervisor **fails open** — it logs the
+  read error and still allows the run, so an unapplied migration cannot silently halt production.
 
 ## Old single-env layout (deprecated)
 

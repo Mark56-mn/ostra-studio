@@ -10,6 +10,7 @@ import { listEvents, createEvent } from "./routes/events.js";
 import { listApprovals, createApproval } from "./routes/approvals.js";
 import { listWorkers, createWorker, patchWorker, heartbeatWorker } from "./routes/workers.js";
 import { registerWorker, heartbeatByIdentity } from "./routes/registration.js";
+import { listModels, setModelEnabled } from "./routes/models.js";
 import { listCharacters, createCharacter, patchCharacter, deleteCharacter } from "./routes/characters.js";
 import { listLocations, createLocation, patchLocation, deleteLocation } from "./routes/locations.js";
 import { listArtifacts, createArtifact } from "./routes/artifacts.js";
@@ -73,6 +74,10 @@ app.patch("/api/workers/:id", patchWorker);
 app.post("/api/workers/:id/heartbeat", heartbeatWorker);
 app.post("/api/workers/register", registerWorker);
 app.post("/api/workers/heartbeat", heartbeatByIdentity);
+
+// AI model switches — operator on/off intent, merged with real provider health
+app.get("/api/models", listModels);
+app.patch("/api/models/:key", setModelEnabled);
 
 // Runtime schedules — persisted, editable, timezone-aware
 app.get("/api/runtime/schedules", listSchedules);
