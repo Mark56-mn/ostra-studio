@@ -42,7 +42,9 @@ export async function registerWorker(req: Request, res: Response) {
   if (!worker_type || !runtime || !provider) {
     return res.status(400).json({ error: "worker_type, runtime and provider are required" });
   }
-  if (!["script","image","voice","video","youtube"].includes(worker_type)) {
+  // `overseer` is the optional dedicated Showrunner runtime; the channel falls back to the Script AI
+  // worker when no overseer is registered, so it is additive and never required.
+  if (!["script","image","voice","video","youtube","overseer"].includes(worker_type)) {
     return res.status(400).json({ error: "invalid worker_type" });
   }
 

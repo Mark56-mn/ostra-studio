@@ -17,6 +17,14 @@ import { listArtifacts, createArtifact } from "./routes/artifacts.js";
 import { listSchedules, createSchedule, getSchedule, patchSchedule, deleteSchedule, seedDefaultSchedules } from "./routes/schedules.js";
 import { schedulerTickHandler, runNowHandler, listStartupHistory } from "./routes/runtime.js";
 import { listRooms, createRoom, patchRoom, listMessages, postMessage, getStore } from "./routes/chat.js";
+import {
+  getRoster,
+  listStudioRooms,
+  createStudioRoom,
+  patchStudioRoom,
+  listChannelMessages,
+  dispatchRound,
+} from "./routes/agents.js";
 
 const app = express();
 app.use(corsMiddleware);
@@ -104,6 +112,14 @@ app.patch("/api/chat/rooms/:id", patchRoom);
 app.get("/api/chat/rooms/:id/messages", listMessages);
 app.post("/api/chat/rooms/:id/messages", postMessage);
 app.get("/api/chat/store", getStore);
+
+// AI Studio — agents talking to each other, with the Showrunner reporting to the director
+app.get("/api/agents/roster", getRoster);
+app.get("/api/agents/rooms", listStudioRooms);
+app.post("/api/agents/rooms", createStudioRoom);
+app.patch("/api/agents/rooms/:id", patchStudioRoom);
+app.get("/api/agents/rooms/:id/messages", listChannelMessages);
+app.post("/api/agents/rooms/:id/dispatch", dispatchRound);
 
 // 404
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));

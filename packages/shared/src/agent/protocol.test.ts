@@ -203,3 +203,34 @@ describe("buildAgentSystemPrompt", () => {
     assert.doesNotMatch(buildAgentSystemPrompt(snapshot, null), /DIRECTOR NOTE/);
   });
 });
+
+describe("agent-to-agent messages", () => {
+  it("reads the messages array an agent addressed at its peers", () => {
+    const r = parseAgentResponse(
+      '{"reply":"Briefed the picture.","messages":[{"to":"image","kind":"request","content":"Give Kai the left-cheek scar."},{"to":"voice","kind":"handoff","content":"Pace EP1 over the new beats."}],"actions":[]}'
+    );
+    assert.equal(r.parse, "json");
+    assert.deepEqual(r.messages, [
+      { to: "image", kind: "request", content: "Give Kai the left-cheek scar." },
+      { to: "voice", kind: "handoff", content: "Pace EP1 over the new beats." },
+    ]);
+  });
+
+  it("defaults the kind and drops a message with no recipient or no text", () => {
+    const r = parseAgentResponse(
+      '{"reply":"ok","messages":[{"to":"image","content":"match the scar"},{"content":"nowhere to go"},{"to":"nobody","content":"not a participant"}],"actions":[]}'
+    );
+    assert.deepEqual(r.messages, [{ to: "image", kind: "request", content: "match the scar" }]);
+  });
+
+  it("is empty when the model addressed no one", () => {
+    assert.deepEqual(parseAgentResponse('{"reply":"Done.","actions":[]}').messages, []);
+    assert.deepEqual(parseAgentResponse("just prose").messages, []);
+  });
+
+  it("still reads the envelope when only messages are present", () => {
+    const r = parseAgentResponse('{"messages":[{"to":"script","kind":"ack","content":"on it"}]}');
+    assert.equal(r.parse, "json");
+    assert.deepEqual(r.messages, [{ to: "script", kind: "ack", content: "on it" }]);
+  });
+});

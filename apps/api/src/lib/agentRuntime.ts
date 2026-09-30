@@ -15,7 +15,7 @@
 //    A model that did not think produces no reasoning at all — it is never invented.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { workerDisplayHealth, type WorkerHealthRow } from "@ostra/shared";
+import { agentLabel, workerDisplayHealth, type AgentKind, type WorkerHealthRow } from "@ostra/shared";
 
 export type AgentBackendKind = "project_worker" | "hosted_fallback";
 
@@ -111,28 +111,39 @@ function hostedBackend(): AgentBackend {
   };
 }
 
+const WORKER_COLUMNS =
+  "id, type, runtime, provider, model, status, endpoint, last_heartbeat_at, heartbeat_timeout_sec, error, error_code, error_message";
+
 /**
  * Pick the backend for one call. Reads Supabase live — a worker that stopped heartbeating is
  * reported OFFLINE by `workerDisplayHealth`, so it is never chosen.
+ *
+ * `workerTypes` is a PRIORITY list: when two roles can serve the same call (e.g. a dedicated
+ * `overseer` notebook, falling back to the `script` worker), the earlier type wins if it is ONLINE.
+ * `label` is only used in the human-readable status text ("Script AI is ONLINE …").
  */
-export async function resolveAgentBackend(
-  supa: SupabaseClient
+export async function resolveAgentBackendFor(
+  supa: SupabaseClient,
+  workerTypes: string | string[],
+  opts: { label?: string } = {}
 ): Promise<{ backend: AgentBackend | null; status: AgentBackendStatus }> {
+  const types = Array.isArray(workerTypes) ? workerTypes : [workerTypes];
+  const label = opts.label ?? types[0] ?? "agent";
   const candidates: AgentCandidate[] = [];
-  const { data, error } = await supa
-    .from("workers")
-    .select("id, type, runtime, provider, model, status, endpoint, last_heartbeat_at, heartbeat_timeout_sec, error, error_code, error_message")
-    .eq("type", "script");
+  const { data, error } = await supa.from("workers").select(WORKER_COLUMNS).in("type", types);
 
   const rows = (data ?? []) as Array<WorkerHealthRow & { type?: string }>;
-  const online = rows
+  // Rank by the requested priority so the first type that is ONLINE is the one chosen.
+  const rank = new Map(types.map((t, i) => [t, i]));
+  const byType = [...rows].sort((a, b) => (rank.get(a.type ?? "") ?? 99) - (rank.get(b.type ?? "") ?? 99));
+  const online = byType
     .map((row) => ({ row, health: workerDisplayHealth(row) }))
     .filter(({ health }) => health.status === "ONLINE");
 
   for (const { row, health } of online) {
     candidates.push({
       workerId: (row.id as string) ?? null,
-      provider: row.provider ?? "script",
+      provider: row.provider ?? label,
       status: "ONLINE",
       reason: health.reason ?? "heartbeat fresh",
       endpointHost: endpointHost(row.endpoint ?? null),
@@ -143,7 +154,7 @@ export async function resolveAgentBackend(
     if (health.status === "ONLINE") continue;
     candidates.push({
       workerId: (row.id as string) ?? null,
-      provider: row.provider ?? "script",
+      provider: row.provider ?? label,
       status: health.status,
       reason: health.reason ?? "not available",
       endpointHost: endpointHost(row.endpoint ?? null),
@@ -170,7 +181,7 @@ export async function resolveAgentBackend(
         provider: backend.provider,
         model: backend.model,
         endpointHost: backend.endpointHost,
-        detail: `Script AI is ONLINE (${healthSummary(usable.row)}) at ${backend.endpointHost} — this is the project's own model.`,
+        detail: `${label} is ONLINE (${healthSummary(usable.row)}) at ${backend.endpointHost} — this is the project's own model.`,
         candidates,
       },
     };
@@ -188,8 +199,8 @@ export async function resolveAgentBackend(
         endpointHost: backend.endpointHost,
         detail:
           rows.length === 0 && !error
-            ? "No Script AI worker is registered, so the configured hosted fallback model answers."
-            : "No Script AI worker is ONLINE, so the configured hosted fallback model answers.",
+            ? `No ${label} worker is registered, so the configured hosted fallback model answers.`
+            : `No ${label} worker is ONLINE, so the configured hosted fallback model answers.`,
         candidates,
       },
     };
@@ -198,8 +209,8 @@ export async function resolveAgentBackend(
   const reason = error
     ? `the worker registry could not be read (${error.message})`
     : rows.length === 0
-      ? "no Script AI worker is registered yet — start the Kaggle runtime so the project's own model comes ONLINE"
-      : "no Script AI worker is ONLINE (heartbeat expired or endpoint missing)";
+      ? `no ${label} worker is registered yet — start the Kaggle runtime so the project's own model comes ONLINE`
+      : `no ${label} worker is ONLINE (heartbeat expired or endpoint missing)`;
   return {
     backend: null,
     status: {
@@ -212,6 +223,23 @@ export async function resolveAgentBackend(
       candidates,
     },
   };
+}
+
+/** The Agent Chat room's backend: the project's own Script AI, else the hosted fallback. */
+export function resolveAgentBackend(supa: SupabaseClient) {
+  return resolveAgentBackendFor(supa, "script", { label: "Script AI" });
+}
+
+/**
+ * The backend for a production-channel role. The Showrunner prefers a dedicated `overseer` notebook
+ * and falls back to the Script AI worker (a real model, just not a dedicated overseer) — the status
+ * `detail` always says which one actually answered.
+ */
+export function resolveChannelBackend(supa: SupabaseClient, agent: AgentKind) {
+  if (agent === "overseer") {
+    return resolveAgentBackendFor(supa, ["overseer", "script"], { label: "Showrunner" });
+  }
+  return resolveAgentBackendFor(supa, agent, { label: agentLabel(agent) });
 }
 
 function healthSummary(row: WorkerHealthRow): string {

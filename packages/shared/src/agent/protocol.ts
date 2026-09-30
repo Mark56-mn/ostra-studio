@@ -43,6 +43,38 @@ export type AgentAction = {
 
 export type AgentParse = "json" | "text_fallback";
 
+// ── Agent-to-agent messages ──────────────────────────────────────────────────
+// In a multi-agent production channel one agent needs to address another ("Script AI asks Image AI
+// to change Kai's scar"). That is a SEPARATE channel from `reply`: `reply` is shown to the human
+// director, while `messages` is delivered to named peers. Both travel inside the same JSON envelope,
+// and a message is only ever recorded when the model actually emitted it — never inferred.
+
+export const AGENT_MESSAGE_KINDS = ["brief", "position", "request", "handoff", "report", "ack"] as const;
+export type AgentMessageKind = (typeof AGENT_MESSAGE_KINDS)[number];
+
+const MESSAGE_KIND_SET = new Set<string>(AGENT_MESSAGE_KINDS);
+export function isAgentMessageKind(value: unknown): value is AgentMessageKind {
+  return typeof value === "string" && MESSAGE_KIND_SET.has(value);
+}
+
+/** Everyone who can appear in a channel: the four AI roles plus the human director. */
+export const AGENT_PARTICIPANTS = ["director", "script", "image", "voice", "overseer"] as const;
+export type AgentParticipant = (typeof AGENT_PARTICIPANTS)[number];
+
+export function isAgentParticipant(value: unknown): value is AgentParticipant {
+  return typeof value === "string" && (AGENT_PARTICIPANTS as readonly string[]).includes(value);
+}
+
+/** One message an agent addressed at a named peer. */
+export type AgentOutboundMessage = {
+  to: AgentParticipant;
+  kind: AgentMessageKind;
+  content: string;
+};
+
+/** Longest single peer message we keep (a small model can ramble; this caps display, never the call). */
+export const AGENT_MESSAGE_MAX_CHARS = 4000;
+
 /** The interpreted answer of one agent call. `reply` is always what the human is shown. */
 export type AgentReply = {
   reply: string;
@@ -55,6 +87,8 @@ export type AgentReply = {
    * model answered without thinking — the UI then renders nothing rather than an empty box.
    */
   reasoning: string;
+  /** Messages this agent explicitly addressed at its peers. Empty when it addressed none. */
+  messages: AgentOutboundMessage[];
 };
 
 /** Longest reply we accept from a model before truncating it for display (defensive, not a spec). */
@@ -169,6 +203,31 @@ function normalizeAction(raw: unknown): { action: AgentAction } | { rejected: st
   return { action };
 }
 
+/**
+ * Normalize the model's `messages` array. A recipient that is not a known participant, or a message
+ * with no text, is DROPPED rather than reported — an unaddressed message has nowhere to go, and the
+ * reply itself still carries anything the model meant for the director. An unknown recipient is
+ * surfaced via `rejected`-style dropping only for debugging through the returned list; here we keep
+ * it simple and only return deliverable messages.
+ */
+function normalizeOutboundMessages(raw: unknown): AgentOutboundMessage[] {
+  const list = Array.isArray(raw) ? raw : isPlainObject(raw) ? [raw] : [];
+  const out: AgentOutboundMessage[] = [];
+  for (const item of list) {
+    if (!isPlainObject(item)) continue;
+    const toRaw = item.to ?? item.target ?? item.recipient ?? item.agent;
+    const to = typeof toRaw === "string" ? toRaw.trim().toLowerCase() : "";
+    if (!isAgentParticipant(to)) continue;
+    const contentRaw = item.content ?? item.message ?? item.text ?? item.body;
+    const content = typeof contentRaw === "string" ? contentRaw.trim() : "";
+    if (!content) continue;
+    const kindRaw = item.kind ?? item.type;
+    const kind = isAgentMessageKind(typeof kindRaw === "string" ? kindRaw.trim().toLowerCase() : "") ? (kindRaw as AgentMessageKind) : "request";
+    out.push({ to, kind, content: content.slice(0, AGENT_MESSAGE_MAX_CHARS) });
+  }
+  return out;
+}
+
 function normalizeActions(raw: unknown): { actions: AgentAction[]; rejected: string[] } {
   const actions: AgentAction[] = [];
   const rejected: string[] = [];
@@ -215,11 +274,13 @@ export function parseAgentResponse(raw: string | null | undefined, explicitReaso
     }
     if (!isPlainObject(parsed)) continue;
     const replyRaw = parsed.reply ?? parsed.message ?? parsed.response ?? parsed.text;
-    const hasActions = "actions" in parsed || "action" in parsed;
-    if (typeof replyRaw !== "string" && !hasActions) continue;
     const { actions, rejected } = normalizeActions(parsed.actions ?? parsed.action ?? []);
+    const messages = normalizeOutboundMessages(parsed.messages ?? parsed.message_to ?? parsed.outbox ?? []);
     const reply = typeof replyRaw === "string" ? replyRaw.trim() : "";
-    if (!reply && actions.length === 0 && rejected.length === 0) continue;
+    // A valid envelope needs a reply, some actions, or at least one peer message. An envelope with
+    // only peer messages is real (the agent addressed a peer and said nothing to the director), and
+    // unrelated JSON with none of those is skipped so it can still fall back to prose.
+    if (!reply && actions.length === 0 && rejected.length === 0 && messages.length === 0) continue;
     // A server forced into JSON mode can only express its thinking INSIDE the envelope, so accept a
     // `reasoning` / `reasoning_content` / `thinking` key on it as well as a separate channel.
     const envelopeReasoning = [parsed.reasoning, parsed.reasoning_content, parsed.thinking].find(
@@ -231,9 +292,17 @@ export function parseAgentResponse(raw: string | null | undefined, explicitReaso
       parse: "json",
       rejected,
       reasoning: combineReasoning(reasoning, envelopeReasoning),
+      messages,
     };
   }
-  return { reply: text.trim().slice(0, AGENT_REPLY_MAX_CHARS), actions: [], parse: "text_fallback", rejected: [], reasoning };
+  return {
+    reply: text.trim().slice(0, AGENT_REPLY_MAX_CHARS),
+    actions: [],
+    parse: "text_fallback",
+    rejected: [],
+    reasoning,
+    messages: [],
+  };
 }
 
 // ── Store context handed to the model ────────────────────────────────────────

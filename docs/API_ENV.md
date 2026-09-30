@@ -91,6 +91,34 @@ POST  /api/chat/rooms/:id/messages    → body { content: string, note?: string 
 GET   /api/chat/store?projectId=      → { projects: [{id,slug,title}], snapshot }
 ```
 
+### AI Studio — `GET /api/agents/roster` · `/api/agents/rooms*` · `POST /api/agents/rooms/:id/dispatch`
+
+Backed by migration `007` (`chat_rooms.kind='studio'` + the `agent_messages` table). This is the
+**agent-to-agent** channel: Script AI, Image AI and Voice AI coordinate on a project, and the Showrunner
+(`overseer`) reports the real status to the director. The orchestrator mediates every message — nothing
+is a hidden model-to-model conversation.
+
+```
+GET   /api/agents/roster                  → { roster: [{ kind, label, workerType, specialty, accent,
+                                                  available, provider, model, endpointHost, detail, candidates }] }
+GET   /api/agents/rooms                   → { rooms: [{ id, project_id, title, kind, … }] }
+POST  /api/agents/rooms                   → body { project_id?: uuid|null, title?: string } → 201 { room }
+PATCH /api/agents/rooms/:id               → body { project_id?: uuid|null, title?: string } → { room }
+GET   /api/agents/rooms/:id/messages      → { room, messages: <agent_messages[]>, roster, timestamp }
+POST  /api/agents/rooms/:id/dispatch      → body { brief?: string (≤8000 chars), note?: string, overseer?: bool }
+                                          → { turns: <AgentTurnResult[]>, changed, failedWrites, messages, roster }
+```
+
+`POST .../dispatch` persists the director's `brief` first (to `director → script`, kind `brief`), then
+runs each production agent **once, in order** (`script → image → voice`), then the Showrunner. Each agent
+is called only when its worker is genuinely ONLINE; an offline agent's turn is reported as `ok:false`
+with its real reason, and its inbox stays `sent` (never marked delivered to a model that was not asked).
+An agent's envelope is `{"reply": …, "messages": [{"to":"image","kind":"request","content":…}], "actions": […]}`
+— `reply` goes to the director, `messages` go to peers. Store writes use the same additive allow-list as
+Agent Chat (audited in `events` as `agent.store_change`, actor `agent:<role>`). The Showrunner uses a
+dedicated `overseer` worker when one is ONLINE, else the Script AI worker; the roster `detail` always
+says which one answered.
+
 `POST …/messages` is one turn: the human message is stored **first**, then the model is called with the live
 store snapshot in its system prompt, then the requested store writes are applied, then the assistant row is
 written with what actually changed. Response:
@@ -166,6 +194,18 @@ collapsible **THINKING** block (word count in the summary) directly above the an
 
 `GET /api/v1/kernels/list?pageSize=1` (auth gate) → `GET /api/v1/kernels/pull?user_name={owner}&kernel_slug={slug}` (kernel source + `metadata.currentVersionNumber`) → `POST /api/v1/kernels/push` via `ApiSaveKernelRequest{ slug, newTitle, text, language, kernelType, isPrivate, enableInternet, enableGpu/Tpu, … }` → `ApiSaveKernelResponse{ versionNumber, url, ref }` → `provider_run_id = ref@vN` (`bettertrade/notebook7eae283a4a@vN`). A bare `notebook7eae283a4a` is resolved via `resolveKaggleKernelRef()` → `GET /api/v1/kernels/list?group=profile&search=`; a ref with a slash bypasses that search. `/api/v1/kernels/list` rejects `mine=true` (HTTP 400) and `GET /api/v1/kernels/{owner}/{slug}` returns the HTML site page (404), so neither is used any more. `KGAT_*` tokens authenticate as `Bearer`. The push reply's `ref` is the **site form** `"/code/owner/slug"` (verified live), so `canonicalizeKernelRef()` normalizes it back to `owner/slug` before building `provider_run_id = owner/slug@vN` (the raw value is kept as `provider_response.providerRef`). If the kernel source cannot be read the starter fails with the real HTTP status and never calls push. Read-only credential check: `bun run verify:kaggle --kernel-ref=bettertrade/notebook7eae283a4a`. A push only *requests* a run: ONLINE additionally requires the notebook's bootstrap cell (`scripts/kaggle-worker-bootstrap.py`) to register and heartbeat — keep the live notebook in sync with `bun run sync:notebook --apply`.
 
+### Other agents on Kaggle — `scripts/kaggle-agent-notebook.ts`
+
+Image AI, Voice AI and the Showrunner now have their own Kaggle notebooks, generated entirely from repo
+sources: `bun scripts/kaggle-agent-notebook.ts --agent=image --agent=voice --agent=overseer` (dry run) and
+`… --apply` to create/update the private kernels `bettertrade/ostra-{image,voice,overseer}-agent`. Each
+notebook composes the install cell, a FastAPI OpenAI-compatible chat server on `:8000` (the exact contract
+`agentRuntime.ts` calls), a readiness gate, the ngrok tunnel and `scripts/kaggle-agent-bootstrap.py` with
+**that agent's identity substituted** (`OSTRA_AGENT = "image"`), so it registers as worker type
+`image` / `voice` / `overseer` and heartbeats. Nothing is faked: if the model fails to load, the server
+is down, the tunnel check records the real failure and the agent never comes ONLINE. The notebooks are
+created from the repo, so re-running the script refreshes them.
+
 ### Colab auto-start (real API, truthful when not allowlisted) — `ColabImageRuntimeStarter` / `ColabVoiceRuntimeStarter`
 
 Both `autostartable=true` so the scheduler can attempt; missing `GOOGLE_CLOUD_PROJECT`→`NOT_AUTOSTARTABLE`, missing `GOOGLE_OAUTH_TOKEN`→`AUTH_FAILED`, missing bootstrap→`NOT_AUTOSTARTABLE` (notebook URL is not an execution method), spec `eligible=false`→`NOT_AUTOSTARTABLE`, `GET /v1beta/runtimespecs` allowlist check. On success, `POST /v1beta/runtimes` → `Operation{ name: operations/... }` → real `provider_run_id`.
@@ -177,6 +217,7 @@ Supabase migrations (run once, idempotent, in order):
 - `supabase/migrations/004_model_controls.sql`
 - `supabase/migrations/005_conversations.sql` (Agent Chat rooms + messages)
 - `supabase/migrations/006_chat_reasoning.sql` (adds `chat_messages.reasoning` — the model's thinking)
+- `supabase/migrations/007_agent_channel.sql` (adds `chat_rooms.kind` + the `agent_messages` channel table)
 
 Storage bucket: `ostra-assets`
 

@@ -168,6 +168,34 @@ is a deliberate, narrow exception to the rule above, and it is bounded:
 - everything else keeps the rule: worker/task messages carry concise operational rationale
   (decision / reason / action), not raw chain-of-thought.
 
+## AI Studio production channel (2026-09-30 — shipped)
+
+The director asked for the agents to talk to each other (Script AI telling Image AI to adjust a
+character's look, Image AI telling Voice AI to align audio with each scene). This is implemented as a
+**mediated** channel, not a hidden one — it does not violate the rule above, because every message is
+recorded by the orchestrator and every write goes through the orchestrator's allow-list.
+
+- **Roster.** Four roles: `script` (Script AI), `image` (Image AI), `voice` (Voice AI) and `overseer`
+  (Showrunner). Each maps to a `workers.type`; a role is only ever "ONLINE" when its real worker row has
+  a fresh heartbeat (`packages/shared/src/agent/agents.ts` is metadata only, never status).
+- **Channel.** `chat_rooms.kind='studio'` + `agent_messages` (migration `007`). One row per message a
+  participant actually sent: `from_agent`, `to_agent`, `kind` (`brief|position|request|handoff|report|ack`),
+  `content`, `status` (`sent|delivered|failed|reported`), `backend`, `error`.
+- **Peer messages.** The agent envelope gains an optional `messages` array:
+  `{"reply": "<to the director>", "messages": [{"to":"image","kind":"request","content":"..."}], "actions": [...]}`.
+  `reply` is for the human; `messages` is delivered to named peers. A message with an unknown recipient
+  or no text is dropped; nothing is inferred from prose.
+- **A round.** `POST /api/agents/rooms/:id/dispatch` runs each production agent once **in order**
+  (Script → Image → Voice), then the Showrunner, and is bounded so a chatty model cannot spin forever.
+  Each agent reads the whole channel so far plus the real store. An offline agent is skipped and its
+  inbox stays `sent`; its inbound messages are only marked `delivered` after its call actually ran.
+- **Showrunner.** Prefers a dedicated `overseer` worker and falls back to the Script AI worker; the status
+  `detail` always says which one answered. It reports the true status and never claims progress it
+  cannot see in the channel.
+- **No fabrication.** Nothing is written that a model did not produce; a failed call records the real
+  error. Store writes are additive only (same `AGENT_ACTION_OPS` allow-list) and each success is audited
+  in `events` as `agent.store_change` with actor `agent:<role>`.
+
 ## Provider replacement
 
 The workflow must depend on capability contracts, not provider-specific behavior.

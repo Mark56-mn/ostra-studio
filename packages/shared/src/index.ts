@@ -3,6 +3,7 @@
 export * from "./domain/schemas";
 export * from "./domain/schedules";
 export * from "./agent/protocol";
+export * from "./agent/agents";
 export * from "./providers/contracts";
 export * from "./providers/health";
 export * from "./providers/models";
