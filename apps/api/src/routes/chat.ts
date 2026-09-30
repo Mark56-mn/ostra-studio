@@ -195,7 +195,10 @@ export async function postMessage(req: Request, res: Response) {
   }
 
   // 4) Interpret the answer, apply the requested store changes, then record the turn.
-  const reply = parseAgentResponse(call.content);
+  //    The model's thinking (inline ` thinking…</think>` on the project worker, or a separate
+  //    `reasoning_content` field on other servers) is split off here and stored on its own column,
+  //    so the director can read the reasoning and the answer as two distinct things.
+  const reply = parseAgentResponse(call.content, call.reasoning);
   const store = await applyStoreActions(supa, reply.actions, room.project_id);
   const backendInfo = { ...publicBackend(backend), latencyMs: call.latencyMs, parse: reply.parse };
 
@@ -204,7 +207,9 @@ export async function postMessage(req: Request, res: Response) {
     .insert({
       room_id: id,
       role: "assistant",
-      content: reply.reply || "(the model returned no text)",
+      content: reply.reply || (reply.reasoning ? "(no final answer — the model's thinking is attached)" : "(the model returned no text)"),
+      // NULL, not "", when there was no reasoning: the UI keys off presence, not emptiness.
+      reasoning: reply.reasoning || null,
       actions: store.applied,
       backend: backendInfo,
     })

@@ -152,6 +152,22 @@ Expose concise operational rationale, decisions, and actions.
 
 Do not expose private hidden chain-of-thought.
 
+### Agent Chat exception (2026-09-30 — explicit director request)
+
+The Agent Chat room (`/chat`) shows the Script AI's own thinking in a collapsed **THINKING** block above
+its answer, because the director asked to see the reasoning separately the way a coding agent does. This
+is a deliberate, narrow exception to the rule above, and it is bounded:
+
+- the trace is the model's real output — Qwen3's inline thinking tags inside `content`, or a server's
+  `reasoning_content`-style field — split off by `splitReasoning` **before** the JSON envelope is parsed
+  (`packages/shared/src/agent/protocol.ts`). Ostra never writes, summarises or rewords it, and when the
+  model does not think there is no trace at all, so no block renders. Nothing is ever fabricated;
+- it is collapsed by default, so it never displaces the answer or the operational messages;
+- it is persisted as `chat_messages.reasoning` (migration `006_chat_reasoning.sql`) for the room's audit
+  trail, and is deliberately **not** sent back to the model on later turns, so it cannot compound;
+- everything else keeps the rule: worker/task messages carry concise operational rationale
+  (decision / reason / action), not raw chain-of-thought.
+
 ## Provider replacement
 
 The workflow must depend on capability contracts, not provider-specific behavior.

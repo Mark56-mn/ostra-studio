@@ -10,6 +10,9 @@
 //    gets `available: false` plus the real reason, and the UI says so.
 //  - Endpoint URLs (and any credential) are never returned to the client — only the host.
 //  - A failed call reports the real transport/HTTP error. There is no fabricated answer.
+//  - The model's thinking is returned alongside its answer (an explicit `reasoning_content`-style
+//    field when the server sends one, otherwise Qwen3's inline thinking split out by the parser).
+//    A model that did not think produces no reasoning at all — it is never invented.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { workerDisplayHealth, type WorkerHealthRow } from "@ostra/shared";
@@ -54,7 +57,18 @@ export type AgentMessage = { role: "system" | "user" | "assistant"; content: str
 export type AgentCallFailureCode = "UNREACHABLE" | "TIMEOUT" | "HTTP_ERROR" | "EMPTY_RESPONSE";
 
 export type AgentChatResult =
-  | { ok: true; content: string; latencyMs: number; backend: AgentBackend }
+  | {
+      ok: true;
+      content: string;
+      /**
+       * The model's separate reasoning channel, when the server exposes one (`reasoning_content`,
+       * `reasoning`, `thinking`). null when it did not — Qwen3 instead writes its thinking inline in
+       * `content`, which the parser splits off. Never fabricated.
+       */
+      reasoning: string | null;
+      latencyMs: number;
+      backend: AgentBackend;
+    }
   | { ok: false; code: AgentCallFailureCode; error: string; httpStatus?: number; latencyMs: number; backend: AgentBackend };
 
 const DEFAULT_HOSTED_MODEL = "gpt-4o-mini";
@@ -220,6 +234,23 @@ function readContent(payload: unknown): string | null {
   return null;
 }
 
+/**
+ * Pull a separate reasoning channel out of an OpenAI-compatible response, when the server exposes
+ * one: `message.reasoning_content` (vLLM/DeepSeek-style), `message.reasoning` (OpenRouter-style) or
+ * `message.thinking`. Returns null when the server sent none; Qwen3 instead writes ` thinking…</think>`
+ * inline in `content`, which `parseAgentResponse` splits off by itself.
+ */
+function readReasoning(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const choices = (payload as { choices?: unknown }).choices;
+  const first = Array.isArray(choices) && choices.length > 0 ? (choices[0] as Record<string, unknown>) : null;
+  const message = (first?.message ?? null) as Record<string, unknown> | null;
+  for (const value of [message?.reasoning_content, message?.reasoning, message?.thinking, first?.reasoning_content]) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+}
+
 /** Call the resolved backend once. Every failure path reports what actually happened. */
 export async function callAgent(
   backend: AgentBackend,
@@ -322,7 +353,7 @@ export async function callAgent(
       backend,
     };
   }
-  return { ok: true, content, latencyMs: Date.now() - started, backend };
+  return { ok: true, content, reasoning: readReasoning(json), latencyMs: Date.now() - started, backend };
 }
 
 /** Client-safe projection of a backend (never the endpoint URL). */

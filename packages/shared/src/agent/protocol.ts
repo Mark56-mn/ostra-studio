@@ -9,6 +9,9 @@
 //    never invent actions.
 //  - Anything the model asks for that is not in the allow-list is reported in `rejected`, so a
 //    dropped request is visible instead of silently ignored.
+//  - `reasoning` is whatever the model actually thought — Qwen3 emits ` thinking…</think>` inline in
+//    `content`, other servers return `reasoning_content`. It is split off from `reply` and never
+//    invented: when the model did not think, `reasoning` is empty and the UI shows no thinking block.
 
 /** Store operations the agent may request. Additive only — deliberately no delete ops. */
 export const AGENT_ACTION_OPS = [
@@ -47,10 +50,81 @@ export type AgentReply = {
   parse: AgentParse;
   /** Raw op names the model asked for that are not allowed (delete_*, anything unknown). */
   rejected: string[];
+  /**
+   * The model's own thinking for this turn, when the backend produced it. Empty string when the
+   * model answered without thinking — the UI then renders nothing rather than an empty box.
+   */
+  reasoning: string;
 };
 
 /** Longest reply we accept from a model before truncating it for display (defensive, not a spec). */
 export const AGENT_REPLY_MAX_CHARS = 8000;
+
+/** Longest reasoning trace we keep (a small model can loop; this caps display only, never the call). */
+export const AGENT_REASONING_MAX_CHARS = 20000;
+
+/** A model answer split into its thinking and its actual answer. */
+export type ReasoningSplit = { reasoning: string; answer: string };
+
+/**
+ * Thinking tags seen in the wild: Qwen3 emits ` thinking…</think>` inline in `content`; some servers
+ * use `<thinking>`/`<reasoning>`. Matched case-insensitively.
+ */
+const THINK_TAGS = "(?:think|thinking|reasoning)";
+
+function trimBlock(value: string): string {
+  return value.replace(/^\s+|\s+$/g, "");
+}
+
+/**
+ * Split a raw model answer into thinking vs answer. Pure, never throws.
+ *
+ *  - ` thinking… response<answer>` → reasoning is the inside, answer is what follows.
+ *  - A stray `</think>` with no opener (a server that stripped the opening tag) → still split.
+ *  - An unterminated ` thinking…` means the model ran out of room mid-thought: the thought is kept
+ *    and the answer is empty, so the UI can report "no answer" honestly instead of presenting half
+ *    a thought as if it were the reply.
+ *  - No tags at all → reasoning is empty and the whole text is the answer.
+ */
+export function splitReasoning(raw: string | null | undefined): ReasoningSplit {
+  const text = typeof raw === "string" ? raw : "";
+  if (!text.trim()) return { reasoning: "", answer: "" };
+
+  const open = new RegExp(`<${THINK_TAGS}>`, "i").exec(text);
+  const close = new RegExp(`</${THINK_TAGS}>`, "i").exec(text);
+
+  if (close) {
+    const openBefore = open && open.index < close.index ? open : null;
+    const reasoning = openBefore
+      ? text.slice(openBefore.index + openBefore[0].length, close.index)
+      : text.slice(0, close.index);
+    const lead = openBefore ? trimBlock(text.slice(0, openBefore.index)) : "";
+    const tail = text.slice(close.index + close[0].length).replace(/^\s+/, "");
+    return {
+      reasoning: trimBlock(reasoning).slice(0, AGENT_REASONING_MAX_CHARS),
+      answer: [lead, tail].filter(Boolean).join("\n"),
+    };
+  }
+
+  if (open) {
+    return {
+      reasoning: trimBlock(text.slice(open.index + open[0].length)).slice(0, AGENT_REASONING_MAX_CHARS),
+      answer: "",
+    };
+  }
+
+  return { reasoning: "", answer: text };
+}
+
+/**
+ * Combine inline thinking with a separate reasoning channel (e.g. an OpenAI-compatible
+ * `choices[0].message.reasoning_content`). The explicit channel wins when both are present.
+ */
+export function combineReasoning(inline: string, explicit?: string | null): string {
+  const fromField = typeof explicit === "string" ? explicit.trim() : "";
+  const chosen = fromField || inline.trim();
+  return chosen.slice(0, AGENT_REASONING_MAX_CHARS);
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -122,11 +196,16 @@ function jsonCandidates(text: string): string[] {
 
 /**
  * Interpret one raw model answer. Never throws.
- * Prefers the strict `{"reply": ..., "actions": [...]}` envelope; falls back to treating the whole
- * answer as prose (`parse: "text_fallback"`) rather than fabricating a reply or dropping the text.
+ * Thinking is split off FIRST: the strict `{"reply": ..., "actions": [...]}` envelope is looked for
+ * only in the answer, so reasoning that happens to contain braces can never be mistaken for the
+ * envelope. Falls back to treating the answer as prose (`parse: "text_fallback"`) rather than
+ * fabricating a reply or dropping the text.
+ * `explicitReasoning` is the backend's separate reasoning channel, when it returned one.
  */
-export function parseAgentResponse(raw: string | null | undefined): AgentReply {
-  const text = typeof raw === "string" ? raw : "";
+export function parseAgentResponse(raw: string | null | undefined, explicitReasoning?: string | null): AgentReply {
+  const split = splitReasoning(raw);
+  const reasoning = combineReasoning(split.reasoning, explicitReasoning);
+  const text = split.answer;
   for (const candidate of jsonCandidates(text)) {
     let parsed: unknown;
     try {
@@ -141,9 +220,20 @@ export function parseAgentResponse(raw: string | null | undefined): AgentReply {
     const { actions, rejected } = normalizeActions(parsed.actions ?? parsed.action ?? []);
     const reply = typeof replyRaw === "string" ? replyRaw.trim() : "";
     if (!reply && actions.length === 0 && rejected.length === 0) continue;
-    return { reply: reply.slice(0, AGENT_REPLY_MAX_CHARS), actions, parse: "json", rejected };
+    // A server forced into JSON mode can only express its thinking INSIDE the envelope, so accept a
+    // `reasoning` / `reasoning_content` / `thinking` key on it as well as a separate channel.
+    const envelopeReasoning = [parsed.reasoning, parsed.reasoning_content, parsed.thinking].find(
+      (value): value is string => typeof value === "string" && value.trim().length > 0
+    );
+    return {
+      reply: reply.slice(0, AGENT_REPLY_MAX_CHARS),
+      actions,
+      parse: "json",
+      rejected,
+      reasoning: combineReasoning(reasoning, envelopeReasoning),
+    };
   }
-  return { reply: text.trim().slice(0, AGENT_REPLY_MAX_CHARS), actions: [], parse: "text_fallback", rejected: [] };
+  return { reply: text.trim().slice(0, AGENT_REPLY_MAX_CHARS), actions: [], parse: "text_fallback", rejected: [], reasoning };
 }
 
 // ── Store context handed to the model ────────────────────────────────────────
@@ -236,6 +326,7 @@ export function buildAgentSystemPrompt(snapshot: AgentStoreSnapshot | null, dire
     "- Only use the operations listed below. Never send ids. Refer to things exactly as they appear in the store context: project slug, character name, location name, episode number, scene index.",
     "- If the director is just talking, asking a question or thinking out loud, return \"actions\": [].",
     "- Never invent characters, episodes or story facts that are not in the store context or in this conversation.",
+    "- You may reason as much as you need inside  thinking…</think>. The director sees that reasoning as its own block, so put the JSON object AFTER </think> and nothing after it.",
     "- You cannot delete anything and you must not promise that you did.",
     "",
     AGENT_ACTION_REFERENCE,

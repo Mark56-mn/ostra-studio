@@ -147,6 +147,7 @@ supabase/migrations/002_runtime_supervisor.sql  # schedules + leases + history +
 supabase/migrations/003_runtime_supervisor_extensions.sql  # full spec §4-5 (worker_id, error_code, startup_request_id, status lifecycle)
 supabase/migrations/004_model_controls.sql  # per-model on/off switches (/api/models, /models)
 supabase/migrations/005_conversations.sql  # Agent Chat rooms + messages (/api/chat/*, /chat)
+supabase/migrations/006_chat_reasoning.sql  # + chat_messages.reasoning (model thinking shown separately)
 docs/ENV.md             # split env reference (now includes supervisor vars + aliases)
 handoffs/               # mandatory handovers
 ```

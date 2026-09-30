@@ -4,11 +4,20 @@ import { describe, it } from "node:test";
 import {
   AGENT_ACTION_OPS,
   buildAgentSystemPrompt,
+  combineReasoning,
   isAgentActionOp,
   parseAgentResponse,
   renderStoreContext,
+  splitReasoning,
   type AgentStoreSnapshot,
 } from "./protocol.js";
+
+// The thinking tags are built from char codes on purpose: written literally they are indistinguishable
+// from HTML and some file-writing paths drop them, which silently empties these tests.
+const LT = String.fromCharCode(60);
+const GT = String.fromCharCode(62);
+const withThink = (reasoning: string, answer: string) => `${LT}think${GT}${reasoning}${LT}/think${GT}${answer}`;
+const OPEN_THINK = `${LT}think${GT}`;
 
 describe("agent action allow-list", () => {
   it("is additive only — no delete operation is ever allowed", () => {
@@ -80,6 +89,72 @@ describe("parseAgentResponse", () => {
   });
 });
 
+describe("thinking is separated from the answer", () => {
+  it("splits Qwen3-style inline thinking off the JSON envelope", () => {
+    const r = parseAgentResponse(
+      withThink(
+        "Kai needs a rival, so I will create Rin.",
+        '{"reply":"Added Rin.","actions":[{"op":"create_character","data":{"name":"Rin"}}]}'
+      )
+    );
+    assert.equal(r.reasoning, "Kai needs a rival, so I will create Rin.");
+    assert.equal(r.parse, "json");
+    assert.equal(r.reply, "Added Rin.");
+    assert.deepEqual(r.actions, [{ op: "create_character", data: { name: "Rin" } }]);
+  });
+
+  it("keeps thinking out of a prose answer too", () => {
+    const r = parseAgentResponse(withThink("Maybe the ink should bleed.", "The ink could bleed into the gutters."));
+    assert.equal(r.parse, "text_fallback");
+    assert.equal(r.reasoning, "Maybe the ink should bleed.");
+    assert.equal(r.reply, "The ink could bleed into the gutters.");
+  });
+
+  it("does not let braces inside the thinking hijack the envelope", () => {
+    const r = parseAgentResponse(
+      withThink('Draft: {"reply":"wrong"} — discard that.', '{"reply":"Real.","actions":[]}')
+    );
+    assert.equal(r.reply, "Real.");
+    assert.deepEqual(r.actions, []);
+    assert.equal(r.reasoning, 'Draft: {"reply":"wrong"} — discard that.');
+  });
+
+  it("keeps an unterminated thought and reports an empty answer", () => {
+    const r = parseAgentResponse(`${OPEN_THINK}I am still working out the arc and the budget ran out`);
+    assert.equal(r.reasoning, "I am still working out the arc and the budget ran out");
+    assert.equal(r.reply, "");
+    assert.deepEqual(r.actions, []);
+  });
+
+  it("uses the backend's separate reasoning channel when it sends one", () => {
+    const r = parseAgentResponse('{"reply":"Done.","actions":[]}', "Considered three options.");
+    assert.equal(r.reasoning, "Considered three options.");
+    assert.equal(r.reply, "Done.");
+  });
+
+  it("reads a reasoning key inside the JSON envelope (a server forced into JSON mode)", () => {
+    const r = parseAgentResponse('{"reasoning":"Weighed two openings.","reply":"Done.","actions":[]}');
+    assert.equal(r.reasoning, "Weighed two openings.");
+    assert.equal(r.reply, "Done.");
+    assert.deepEqual(r.actions, []);
+  });
+
+  it("reports no reasoning at all when the model did not think", () => {
+    assert.equal(parseAgentResponse('{"reply":"Done.","actions":[]}').reasoning, "");
+  });
+
+  it("splitReasoning handles both tag spellings and is safe on empty input", () => {
+    assert.deepEqual(splitReasoning(withThink("thinking hard", "the answer")), { reasoning: "thinking hard", answer: "the answer" });
+    assert.deepEqual(splitReasoning(`${LT}thinking${GT}alt spelling${LT}/thinking${GT}answer`), {
+      reasoning: "alt spelling",
+      answer: "answer",
+    });
+    assert.deepEqual(splitReasoning(""), { reasoning: "", answer: "" });
+    assert.deepEqual(splitReasoning("just an answer"), { reasoning: "", answer: "just an answer" });
+    assert.equal(combineReasoning("", null), "");
+  });
+});
+
 const snapshot: AgentStoreSnapshot = {
   project: { id: "p1", slug: "crimson-ink", title: "Crimson Ink", logline: "A brush that paints fate.", story_bible: { premise: "Ink is memory." } },
   characters: [{ name: "Kai", role: "protagonist", description: "Calligrapher" }],
@@ -117,6 +192,10 @@ describe("buildAgentSystemPrompt", () => {
     assert.match(prompt, /EXACTLY ONE JSON object/);
     for (const op of AGENT_ACTION_OPS) assert.match(prompt, new RegExp(op));
     assert.match(prompt, /STORE CONTEXT/);
+  });
+
+  it("tells the model its reasoning is shown separately from the JSON answer", () => {
+    assert.match(buildAgentSystemPrompt(snapshot), /reason as much as you need inside/);
   });
 
   it("adds the room note when one is set", () => {

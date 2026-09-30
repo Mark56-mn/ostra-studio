@@ -7,6 +7,7 @@ import {
   backendLabel,
   formatClock,
   mergeMessages,
+  reasoningWords,
   type AppliedAction,
   type ChatMessage,
 } from "./chat.js";
@@ -17,6 +18,7 @@ function message(id: string, createdAt: string, content = id, role: "user" | "as
     room_id: "r1",
     role,
     content,
+    reasoning: null,
     actions: [],
     backend: null,
     error: null,
@@ -36,6 +38,11 @@ describe("mergeMessages", () => {
     const existing = [{ ...message("a", "2026-09-29T10:00:01.000Z", "sending…") }];
     const incoming = [{ ...message("a", "2026-09-29T10:00:01.000Z", "the real answer") }];
     assert.equal(mergeMessages(existing, incoming)[0].content, "the real answer");
+  });
+
+  it("carries the model's reasoning through a merge", () => {
+    const incoming = [{ ...message("a", "2026-09-29T10:00:01.000Z"), reasoning: "I weighed two options." }];
+    assert.equal(mergeMessages([], incoming)[0].reasoning, "I weighed two options.");
   });
 
   it("is stable when timestamps are equal or unparseable", () => {
@@ -92,6 +99,18 @@ describe("backendLabel", () => {
 
   it("returns null when there was no backend", () => {
     assert.equal(backendLabel(null), null);
+  });
+});
+
+describe("reasoningWords", () => {
+  it("counts the words of a real reasoning trace", () => {
+    assert.equal(reasoningWords("the ink should bleed into the gutters"), 7);
+  });
+
+  it("is zero when the model did not think", () => {
+    assert.equal(reasoningWords(null), 0);
+    assert.equal(reasoningWords(undefined), 0);
+    assert.equal(reasoningWords("   \n  "), 0);
   });
 });
 

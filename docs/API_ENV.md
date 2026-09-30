@@ -99,6 +99,7 @@ written with what actually changed. Response:
 {
   "user_message": { "id": "…", "role": "user", "content": "…" },
   "message": { "id": "…", "role": "assistant", "content": "…",
+               "reasoning": "…",   // the model's thinking for this turn, or null when it did not think
                "actions": [ { "op": "create_character", "ok": true, "entity": "character",
                               "ref": "character:Kai", "id": "…", "summary": "Created character \"Kai\"" } ],
                "backend": { "kind": "project_worker", "provider": "kaggle", "model": "Qwen/Qwen3-1.7B",
@@ -131,6 +132,19 @@ delete op, so chat can never destroy a row or an artifact. Store writes go throu
 allow-lists as the REST routes (`apps/api/src/lib/storeActions.ts`) and each success inserts an
 `events` row of type `agent.store_change`.
 
+**Thinking is separated from the answer.** The Qwen3 worker thinks by default, and its thinking arrives
+inline in `choices[0].message.content` as ` thinking…</think>` before the JSON envelope; other
+OpenAI-compatible servers instead return a `reasoning_content` / `reasoning` / `thinking` field (read in
+`apps/api/src/lib/agentRuntime.ts`, returned as `AgentChatResult.reasoning`). `splitReasoning` in
+`packages/shared/src/agent/protocol.ts` cuts the thinking off **before** the envelope is looked for — so
+reasoning that contains braces can never be mistaken for the JSON reply — and `parseAgentResponse` returns
+it as `AgentReply.reasoning` alongside `reply`/`actions`. It is stored in `chat_messages.reasoning`
+(migration `006_chat_reasoning.sql`) and shown in the room as a collapsed **THINKING** block above the
+answer. When the model answers without thinking, `reasoning` is `null`/empty and no block is rendered — a
+thinking trace is never invented. An unterminated ` thinking` (the model ran out of tokens mid-thought) is
+kept as reasoning with an empty reply, and the assistant row says so instead of presenting half a thought
+as the answer. Note: thinking is not fed back into the next turn's history — only the answers are.
+
 Extra env vars (all optional — the room works with the project's own worker alone):
 
 ```bash
@@ -145,7 +159,8 @@ AGENT_MAX_TOKENS=900
 
 The dashboard page is `/chat` (nav: **Agent Chat**): transcript + composer on the left, rooms and the live
 store panel on the right. The transcript polls every 3s and the store panel every 6s, so a change made in
-another tab shows up without a reload.
+another tab shows up without a reload. Each assistant message with a thinking trace renders it in a
+collapsible **THINKING** block (word count in the summary) directly above the answer it belongs to.
 
 ### Kaggle auto-start (real, not probe-only) — `KaggleRuntimeStarter`
 
@@ -161,6 +176,7 @@ Supabase migrations (run once, idempotent, in order):
 - `supabase/migrations/003_runtime_supervisor_extensions.sql`
 - `supabase/migrations/004_model_controls.sql`
 - `supabase/migrations/005_conversations.sql` (Agent Chat rooms + messages)
+- `supabase/migrations/006_chat_reasoning.sql` (adds `chat_messages.reasoning` — the model's thinking)
 
 Storage bucket: `ostra-assets`
 

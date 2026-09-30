@@ -55,6 +55,11 @@ export type ChatMessage = {
   room_id: string;
   role: "user" | "assistant";
   content: string;
+  /**
+   * The model's own thinking for this turn, when the backend produced it. null means the model
+   * answered without a separate reasoning trace — the UI then shows no thinking block.
+   */
+  reasoning: string | null;
   actions: AppliedAction[];
   backend: ChatBackend | null;
   error: { code?: string; reason?: string } | null;
@@ -251,4 +256,11 @@ export function formatClock(iso: string): string {
   const t = new Date(iso);
   if (Number.isNaN(t.getTime())) return "";
   return t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Approximate word count of a reasoning trace, used for the collapsed "thinking" label. */
+export function reasoningWords(reasoning: string | null | undefined): number {
+  const text = (reasoning ?? "").trim();
+  if (!text) return 0;
+  return text.split(/\s+/).length;
 }

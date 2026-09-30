@@ -15,6 +15,7 @@ import {
   listRooms,
   mergeMessages,
   patchRoom,
+  reasoningWords,
   sendMessage,
   type AgentStatus,
   type ChatBackend,
@@ -492,6 +493,7 @@ export default function ChatPage() {
 function MessageRow({ message }: { message: ChatMessage }) {
   const mine = message.role === "user";
   const backend = backendLabel(message.backend);
+  const words = mine ? 0 : reasoningWords(message.reasoning);
   return (
     <div className={`flex ${mine ? "justify-end" : "justify-start"}`}>
       <div
@@ -503,6 +505,22 @@ function MessageRow({ message }: { message: ChatMessage }) {
           <span className="label-mono text-[#6B7594]">{mine ? "DIRECTOR" : "SCRIPT AI"}</span>
           <span className="text-[10px] text-[#6B7594]">{formatClock(message.created_at)}</span>
         </div>
+
+        {/* The model's thinking, kept in its own collapsible block so it never reads as the answer.
+            Rendered only when a real reasoning trace exists — a model that did not think shows none. */}
+        {words > 0 && (
+          <details className="group mb-2 rounded-lg border border-white/[0.06] bg-[#070A14]/60">
+            <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-[11px] text-[#6B7594] transition hover:text-[#9AA3C0] [&::-webkit-details-marker]:hidden">
+              <span aria-hidden className="text-[9px] transition-transform group-open:rotate-90">▶</span>
+              <span className="label-mono">THINKING</span>
+              <span className="text-[#4C5570]">· {words} words — reasoning, not the answer</span>
+            </summary>
+            <div className="max-h-64 overflow-y-auto whitespace-pre-wrap border-t border-white/[0.06] px-2.5 py-2 font-mono text-[11px] leading-5 text-[#8B94B4]">
+              {message.reasoning}
+            </div>
+          </details>
+        )}
+
         <div className="whitespace-pre-wrap text-[13px] leading-6 text-[#E8ECF8]">{message.content}</div>
 
         {message.actions.length > 0 && (
