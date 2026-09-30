@@ -149,6 +149,7 @@ supabase/migrations/004_model_controls.sql  # per-model on/off switches (/api/mo
 supabase/migrations/005_conversations.sql  # Agent Chat rooms + messages (/api/chat/*, /chat)
 supabase/migrations/006_chat_reasoning.sql  # + chat_messages.reasoning (model thinking shown separately)
 supabase/migrations/007_agent_channel.sql  # AI Studio agent-to-agent channel (/api/agents/*, /studio)
+supabase/migrations/008_overseer_worker_type.sql  # allows the dedicated Showrunner worker type
 docs/ENV.md             # split env reference (now includes supervisor vars + aliases)
 handoffs/               # mandatory handovers
 ```

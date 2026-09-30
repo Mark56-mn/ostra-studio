@@ -206,6 +206,14 @@ notebook composes the install cell, a FastAPI OpenAI-compatible chat server on `
 is down, the tunnel check records the real failure and the agent never comes ONLINE. The notebooks are
 created from the repo, so re-running the script refreshes them.
 
+Kaggle secrets each agent needs (Kaggle → Add-ons → Secrets; **not** the Render/Vercel env):
+`NGROK_AUTHTOKEN_IMAGE` / `NGROK_AUTHTOKEN_VOICE` / `NGROK_AUTHTOKEN_OVERSEER` (each from a different
+ngrok account, since a free ngrok plan allows one simultaneous tunnel), falling back to a shared
+`NGROK_AUTHTOKEN`; plus `WORKER_REGISTRATION_TOKEN` only if Render sets it. The Showrunner's kernel is
+`bettertrade/ostra-showrunner-agent` (the `overseer` slug is presented as Showrunner so its Kaggle title
+is unique). Verified 2026-09-30: all three notebooks boot the model, serve `/health` and register; they
+register reachable only once an ngrok token is present.
+
 ### Colab auto-start (real API, truthful when not allowlisted) — `ColabImageRuntimeStarter` / `ColabVoiceRuntimeStarter`
 
 Both `autostartable=true` so the scheduler can attempt; missing `GOOGLE_CLOUD_PROJECT`→`NOT_AUTOSTARTABLE`, missing `GOOGLE_OAUTH_TOKEN`→`AUTH_FAILED`, missing bootstrap→`NOT_AUTOSTARTABLE` (notebook URL is not an execution method), spec `eligible=false`→`NOT_AUTOSTARTABLE`, `GET /v1beta/runtimespecs` allowlist check. On success, `POST /v1beta/runtimes` → `Operation{ name: operations/... }` → real `provider_run_id`.
@@ -218,6 +226,7 @@ Supabase migrations (run once, idempotent, in order):
 - `supabase/migrations/005_conversations.sql` (Agent Chat rooms + messages)
 - `supabase/migrations/006_chat_reasoning.sql` (adds `chat_messages.reasoning` — the model's thinking)
 - `supabase/migrations/007_agent_channel.sql` (adds `chat_rooms.kind` + the `agent_messages` channel table)
+- `supabase/migrations/008_overseer_worker_type.sql` (widens `workers_type_check` to allow `overseer`)
 
 Storage bucket: `ostra-assets`
 

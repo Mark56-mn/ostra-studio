@@ -27,6 +27,8 @@ import {
 const KAGGLE_API = "https://www.kaggle.com/api/v1";
 const push = process.argv.includes("--push");
 const logs = process.argv.includes("--logs");
+/** Print the whole run log instead of only the lines that look interesting (early failures are noisy). */
+const rawLog = process.argv.includes("--raw");
 
 function presence(name: string, raw: string | undefined): string {
   if (raw === undefined) return `${name}=MISSING`;
@@ -55,7 +57,10 @@ async function main(): Promise<number> {
     console.log("  env configured: yes (token + kernel ref present)");
   }
 
-  const kernelRefRaw = cfg.kernelRef ?? probeRef;
+  // An explicit --kernel-ref= must WIN over the environment: it exists to probe another kernel
+  // (e.g. an agent notebook) without changing KAGGLE_KERNEL_REF. Previously the env silently took
+  // precedence, so --kernel-ref= was ignored whenever KAGGLE_KERNEL_REF was set.
+  const kernelRefRaw = probeRef ?? cfg.kernelRef;
   const apiToken = cfg.apiToken ?? process.env.KAGGLE_API_TOKEN?.trim();
   if (!apiToken || !kernelRefRaw) {
     console.log("  No probe possible (needs a token AND --kernel-ref). No Kaggle request was attempted.");
@@ -182,7 +187,15 @@ async function main(): Promise<number> {
           }
         }
         console.log(`\n  run log entries: ${entries.length} (real stdout/stderr of the last run)`);
-        if (entries.length) {
+        if (entries.length && rawLog) {
+          console.log("  ---- raw log (--raw) ----");
+          for (const e of entries.slice(0, 300)) {
+            for (const line of String(e.data ?? "").split("\n")) {
+              if (line.trim()) console.log(`    ${line.slice(0, 240)}`);
+            }
+          }
+          console.log("  ---- end raw log ----");
+        } else if (entries.length) {
           const seen = new Set<string>();
           const interesting: string[] = [];
           for (const e of entries) {

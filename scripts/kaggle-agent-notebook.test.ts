@@ -63,4 +63,21 @@ describe("buildAgentNotebook", () => {
     assert.match(text, /127\.0\.0\.1:8000\/health/);
     assert.match(text, /never raises/);
   });
+
+  it("carries a kernelspec and cell ids, without which Papermill aborts the run", () => {
+    const nb = buildAgentNotebook("image", template);
+    assert.equal(nb.metadata.kernelspec.name, "python3");
+    assert.equal(nb.metadata.kernelspec.language, "python");
+    assert.equal(nb.nbformat, 4);
+    assert.ok(nb.cells.every((c) => typeof c.id === "string" && c.id.length > 0));
+  });
+
+  it("lets each agent use its own ngrok token, falling back to the shared one", () => {
+    const voice = buildAgentNotebook("voice", template).cells.map(cellText).join("\n");
+    assert.match(voice, /NGROK_AUTHTOKEN_VOICE/);
+    assert.match(voice, /NGROK_AUTHTOKEN"/);
+    assert.match(voice, /NGROK_AUTHTOKEN_VOICE/);
+    const image = buildAgentNotebook("image", template).cells.map(cellText).join("\n");
+    assert.match(image, /NGROK_AUTHTOKEN_IMAGE/);
+  });
 });

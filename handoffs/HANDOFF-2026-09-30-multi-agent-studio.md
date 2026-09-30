@@ -5,7 +5,7 @@ Branch: `main`
 
 ## 1. Task
 
-The director asked for three things (verbatim intent):
+The director asked for three things:
 
 1. Make sure all changes are pushed to GitHub.
 2. Move the other AI agents onto Kaggle — "create new notebook for the other agents".
@@ -13,157 +13,159 @@ The director asked for three things (verbatim intent):
    character's look/face; Image AI telling Voice AI to make audio line up with each scene), and decide
    whether to add one more AI that oversees everything and reports back to the director.
 
-"you are free to make improvement and adjustments".
+Then, after seeing the notebooks pushed: **"test all the new ai agent you added and make sure all of
+them are responding for ngrok"** — the director will supply ngrok tokens.
 
 ## 2. Result
 
-All three are implemented, typechecked, unit-tested, and the new DB table is applied to live Supabase.
+Implemented, typechecked, unit-tested, applied to live Supabase, and **live-tested against real Kaggle
+runs**.
 
-- **Pushed.** The pending Render-start-command hardening was committed and pushed as `5ae53a8`
-  (`main` level with `origin/main` at handover time).
-- **Kaggle agent notebooks created.** Three private kernels now exist:
-  `bettertrade/ostra-image-agent`, `bettertrade/ostra-voice-agent`, `bettertrade/ostra-overseer-agent`
-  (HTTP 200 from the real Kaggle push API). They are generated from repo sources by
-  `scripts/kaggle-agent-notebook.ts`.
-- **Agent-to-agent channel shipped.** Migration `007` adds `chat_rooms.kind` and the `agent_messages`
-  table; `POST /api/agents/rooms/:id/dispatch` runs one bounded production round
-  (Script → Image → Voice → Showrunner). New page `/studio`.
-- **Overseer added ("Showrunner").** It is a role, not a new provider slot: it prefers a dedicated
-  `overseer` worker and falls back to the Script AI worker. It reports the true status to the director.
+- **Pushed** (`5ae53a8` Render-start hardening, then `c77b6d8` this feature).
+- **Three agent Kaggle notebooks created and verified running:**
+  `bettertrade/ostra-image-agent`, `bettertrade/ostra-voice-agent`,
+  `bettertrade/ostra-showrunner-agent`. Each real run: installs deps → loads `Qwen/Qwen3-1.7B` → serves
+  `/health` HTTP 200 → registers + heartbeats. Verified in the worker registry: `image`, `voice` and
+  `overseer` all reached **ONLINE** with fresh heartbeats.
+- **Channel shipped.** Migration `007` (`chat_rooms.kind` + `agent_messages`) and
+  `POST /api/agents/rooms/:id/dispatch` run a bounded round (Script → Image → Voice → Showrunner).
+  New page `/studio`.
+- **Showrunner added** as a role (prefers an `overseer` worker, falls back to the Script AI worker).
 
-Nothing is fabricated: an agent is only called when genuinely ONLINE; only messages a model actually
-emitted are stored; an offline agent's inbox stays `sent`; failed calls record the real error.
+**What is still missing to be reachable:** no ngrok token is set in the Kaggle account, so each agent
+registers with **no endpoint**. The tested failure is exact:
+`[ostra] ngrok tunnel FAILED (RuntimeError: no ngrok token: set the Kaggle secret NGROK_AUTHTOKEN_IMAGE (or NGROK_AUTHTOKEN))`.
+Adding the tokens turns these ONLINE-and-reachable.
 
 ## 3. Repository state
 
-- Branch `main`. `git status` clean except the files listed in §4 (this handover + the docs/code above
-  were committed together).
-- The Render API cannot be redeployed from this workspace — the operator must redeploy `main` on Render
-  for `/api/agents/*` and migration-dependent behaviour to go live (see §9).
+- Branch `main`; the feature commit is pushed. Migration `007` **and `008`** are applied to the shared
+  Supabase.
+- The Render API is **not** redeployed: `/api/agents/*` is not live there (the deploy still fails at the
+  start step — see `HANDOFF-2026-09-30-render-start-command.md`). The operator must fix the Render
+  Start Command and redeploy.
 
 ## 4. Files changed
 
 New:
-- `packages/shared/src/agent/agents.ts` — the agent roster (script/image/voice/overseer), channel
-  rendering (`renderChannelTranscript`, `inboxFor`) and the per-agent channel prompt
-  (`buildAgentChannelPrompt`).
-- `packages/shared/src/agent/agents.test.ts` — roster/channel/prompt tests.
+- `packages/shared/src/agent/agents.ts` (+ test) — roster, channel rendering, per-agent channel prompt.
 - `supabase/migrations/007_agent_channel.sql` — `chat_rooms.kind` + `agent_messages`.
-- `apps/api/src/lib/agentChannel.ts` — round orchestration: `loadChannel`, `insertChannelMessage`,
-  `runAgentTurn`, `runProductionRound`.
-- `apps/api/src/routes/agents.ts` — roster/rooms/messages/dispatch routes.
-- `apps/web/src/lib/agents.ts` (+ `agents.test.ts`) — client + pure helpers.
-- `apps/web/src/app/studio/page.tsx` — the AI Studio production channel UI.
-- `scripts/kaggle-agent-bootstrap.py` — the generic, identity-parameterized agent bootstrap.
-- `scripts/kaggle-agent-notebook.ts` (+ `.test.ts`) — builds/pushes the agent notebooks.
+- `supabase/migrations/008_overseer_worker_type.sql` — allow `overseer` in `workers_type_check`.
+- `apps/api/src/lib/agentChannel.ts` — round orchestration.
+- `apps/api/src/routes/agents.ts` — roster/rooms/messages/dispatch.
+- `apps/web/src/lib/agents.ts` (+ test) — client + helpers.
+- `apps/web/src/app/studio/page.tsx` — AI Studio UI.
+- `scripts/kaggle-agent-bootstrap.py` — generic identity-parameterized bootstrap.
+- `scripts/kaggle-agent-notebook.ts` (+ test) — builds/pushes agent notebooks (`--agent`, `--apply`,
+  `--dump`, `--list`, `--slug=`, `--owner=`, `--kernel-ref=`).
 - `handoffs/HANDOFF-2026-09-30-multi-agent-studio.md` — this file.
 
 Modified:
-- `packages/shared/src/agent/protocol.ts` — `AgentReply.messages`, `AGENT_MESSAGE_KINDS`,
-  `AGENT_PARTICIPANTS`, `normalizeOutboundMessages`, envelope accepts a messages-only answer;
-  `protocol.test.ts` gained a "agent-to-agent messages" block.
-- `packages/shared/src/index.ts` — exports `./agent/agents`.
-- `apps/api/src/lib/agentRuntime.ts` — `resolveAgentBackendFor(supa, types[], {label})`,
-  `resolveAgentBackend` (script wrapper), `resolveChannelBackend(supa, agent)` (overseer fallback).
-- `apps/api/src/routes/registration.ts` — allows worker type `overseer`.
-- `apps/api/src/index.ts` — registers the six `/api/agents/*` routes.
-- `apps/web/src/components/TopNav.tsx` — adds the "AI Studio" nav item.
-- `README.md`, `AGENT_CONTRACTS.md`, `docs/API_ENV.md` — documentation.
+- `packages/shared/src/agent/protocol.ts` (+ test) — `AgentReply.messages`, message parsing.
+- `packages/shared/src/index.ts` — export `./agent/agents`.
+- `apps/api/src/lib/agentRuntime.ts` — `resolveAgentBackendFor` / `resolveChannelBackend`.
+- `apps/api/src/routes/registration.ts` — accept worker type `overseer`.
+- `apps/api/src/index.ts` — register `/api/agents/*`.
+- `apps/web/src/components/TopNav.tsx` — "AI Studio" nav item.
+- `scripts/kaggle-live-check.ts` — **bug fix:** `--kernel-ref=` now overrides `KAGGLE_KERNEL_REF`
+  (it was silently ignored whenever the env var was set); new `--raw` flag prints the whole run log.
+- `README.md`, `AGENT_CONTRACTS.md`, `docs/API_ENV.md`.
 
 ## 5. Tests/checks
 
 Actually run, with real results:
 
-- `bun test` → **265 pass / 0 fail** across 19 files (was 238/16; +agents/agents.test.ts,
-  +kaggle-agent-notebook.test.ts, +apps/web/src/lib/agents.test.ts, +4 protocol channel cases).
-- `npm run typecheck` (`bun --filter @ostra/web typecheck && bun --filter @ostra/api build`) → both exit 0.
-- `node scripts/apply-migration.mjs supabase/migrations/007_agent_channel.sql` → `CONNECTED OK`,
-  `APPLIED OK`, `DONE`.
-- `node scripts/verify-supabase.mjs` → `TABLES …,agent_messages,…`, `missing: none`, `total tables: 17`.
-- `bun scripts/kaggle-agent-notebook.ts --agent=image --agent=voice --agent=overseer` → dry run, 6 cells
-  each, ~17.6 KB of notebook source.
+- `bun test` → **267 pass / 0 fail** across 19 files.
+- `npm run typecheck` → web + api both exit 0. `bun run lint` → exit 0 (pre-existing warnings only).
+- `node scripts/apply-migration.mjs …007…` and `…008…` → `APPLIED OK` each.
+- `node scripts/verify-supabase.mjs` → `agent_messages` present, 17 tables, `missing: none`.
 - `bun scripts/kaggle-agent-notebook.ts --agent=image --agent=voice --agent=overseer --apply` →
-  three HTTP 200 pushes (`versionNumber` 1 / 1 / 0).
+  HTTP 200; later `--list` shows all three kernels with real `lastRunTime`.
+- `bun scripts/kaggle-live-check.ts --kernel-ref=bettertrade/ostra-{image,voice,showrunner}-agent --logs`
+  → read each run's real stdout.
+- `GET https://ostra-studio-1.onrender.com/api/workers` → `image`, `voice`, `overseer` recorded ONLINE
+  with fresh heartbeats and `NO-ENDPOINT`.
 
 ## 6. Integration status
 
-- **Supabase** — connected + verified (migration applied; table present).
-- **Kaggle (agent notebooks)** — created/verified at the API level (HTTP 200, kernel URLs returned).
-  Whether each notebook **runs and registers** is UNVERIFIED (not observed).
-- **Kaggle (Script AI worker)** — unavailable all session (its ngrok tunnel was offline); unchanged.
-- **Render API** — the new routes exist only in the repo; NOT live until the operator redeploys
-  (previous deploy failed with exit 127 — see the Render handover).
-- **Hosted fallback** — not attempted (`OPENAI_API_KEY` unset).
-- **Live model / channel end-to-end** — NOT verified (no agent was ONLINE during this task).
+- **Supabase** — connected + verified (migrations 007/008 applied; `agent_messages` present).
+- **Kaggle (agent notebooks)** — **verified running**: model loaded, `/health` 200, worker registered.
+  Endpoint reachability NOT verified (no ngrok token).
+- **Kaggle (Script AI)** — its last run (05:30) registered successfully; currently OFFLINE.
+- **ngrok** — unavailable: no token in Kaggle secrets, so no public URL for any agent notebook.
+  The Script notebook's own tunnel (`oversleep-gift-bonfire.ngrok-free.dev`) was from an earlier run.
+- **Render API** — new routes not deployed; operator action required.
+- **Live channel round** — NOT executed (no agent is reachable without a tunnel).
 
 ## 7. Known issues
 
-- **Render not redeployed** → `/studio` will show `HTTP 404` / a clear error until Render is updated.
-  This is the same blocker as the previous handover; the Start Command must be
-  `bun --filter @ostra/api start` in the Render dashboard.
-- **ngrok free tier allows one simultaneous tunnel.** Three agent notebooks running at once will fight
-  over it; run one agent at a time (or upgrade ngrok). The Script AI notebook has the same limit.
-- **The new agent notebooks are unverified at runtime.** They download `Qwen/Qwen3-1.7B` and start a
-  FastAPI server. If the model fails to load, the notebook does not register — honestly.
-- **`AGENT_MAX_TOKENS=900`** remains low for a 4-agent round (each turn must emit a JSON envelope);
-  a long-thinking model can exhaust the budget. Consider raising it on Render.
-- The Showrunner shares the Script AI worker's model when no dedicated `overseer` worker is ONLINE, so
-  its "oversight" is a different prompt on the same small model, not a stronger critic.
-- `apps/api/src/lib/agentChannel.ts` does one DB read of the store + channel per agent turn; fine at this
-  scale but not optimised.
+- **No ngrok token in Kaggle secrets** → every agent notebook registers with no endpoint, so
+  `resolveChannelBackend` skips it (it requires a non-empty endpoint). This is the remaining blocker.
+- **ngrok free plan = one tunnel per account.** Running several agents together needs a token per agent
+  from separate ngrok accounts; the generator already reads `NGROK_AUTHTOKEN_<AGENT>` first.
+- **Kaggle concurrent-session limit.** A kernel push while another run is active returns HTTP 200 with
+  `versionNumber: 0` and creates a hidden draft instead of a runnable kernel. Retry when no other run is
+  active — that is exactly how `ostra-showrunner-agent` eventually created (v1) after image/voice ended.
+  Two orphaned `[Private Notebook]` drafts exist for the earlier `ostra-overseer-agent` attempts; Kaggle
+  has no delete-kernel API, so they were left alone.
+- **The `overseer` slug rename:** the working kernel is `ostra-showrunner-agent` (title "Ostra Showrunner
+  agent"); `ostra-overseer-agent` never materialized.
+- **Notebooks run the same small model for every role.** The role comes from the prompt, so Image/Voice
+  AI are art/audio *directors* that reason in text; their actual image/TTS pipelines are still separate.
+- **Render start command** still must be fixed by the operator.
+- **`AGENT_MAX_TOKENS=900`** is tight for a 4-agent round; consider raising it on Render.
 
 ## 8. Decisions
 
-- **Mediated channel, not model-to-model.** Per `CONSTRAINTS.md` #17 and `AGENT_CONTRACTS.md`, every
-  peer message is persisted by the orchestrator and every store write goes through the additive
-  allow-list. The channel is a table (`agent_messages`), not a side channel.
-- **Overseer is a role, not a ProviderId.** Adding a new `ProviderId` would ripple through
-  `providerHealth`/`registry`/`models`. Instead the Showrunner resolves `[overseer, script]` and always
-  reports which worker answered. Worker type `overseer` was added to registration so a dedicated
-  notebook is possible later.
-- **Rounds are bounded.** Each agent runs at most once per dispatch; the director presses run again to
-  continue. This prevents a chatty model from looping.
-- **Agent notebooks are generated from the repo** rather than edited by hand, so `--apply` is an
-  idempotent refresh.
-- **Envelope extended, parser kept tolerant.** `messages` is parsed by the same `parseAgentResponse`;
-  a messages-only envelope is valid; unknown recipients / empty text are dropped silently.
+- **Mediated channel, not model-to-model** (`CONSTRAINTS.md` #17): every peer message is persisted and
+  every store write uses the additive allow-list.
+- **Overseer is a role, not a `ProviderId`** — avoids rippling through provider health/registry; a
+  dedicated `overseer` worker is preferred when present.
+- **Rounds are bounded** (each agent once per dispatch).
+- **Notebooks are generated from the repo** so `--apply` is an idempotent refresh; identity is a single
+  substituted `OSTRA_AGENT` line.
+- **Per-agent ngrok secret names** (`NGROK_AUTHTOKEN_<AGENT>` → `NGROK_AUTHTOKEN`) so separate ngrok
+  accounts work from one Kaggle account.
+- **Migration 008 widens, never narrows**, the worker-type constraint.
 
 ## 9. Environment/configuration
 
-- **No new environment variables.** The channel uses the existing `SUPABASE_*`, `OPENAI_*`, worker
-  registration and `AGENT_*` keys.
-- **Migration required:** run `supabase/migrations/007_agent_channel.sql` on any environment that does
-  not have it (already applied to the shared Supabase).
-- **Render:** redeploy `main` with Start Command `bun --filter @ostra/api start` (see
-  `HANDOFF-2026-09-30-render-start-command.md`).
-- **Kaggle secrets** for the new notebooks: `NGROK_AUTHTOKEN` (required for the tunnel) and, if Render
-  sets it, `WORKER_REGISTRATION_TOKEN`. Optional: `OSTRA_API_URL`, `OSTRA_KEEPALIVE_MINUTES` (default 10).
-  Secrets are per Kaggle account, so they are shared with the Script AI notebook.
+- **Migrations required:** `007_agent_channel.sql` and `008_overseer_worker_type.sql` (both applied here;
+  run them on any other environment).
+- **Kaggle secrets** (Kaggle → Add-ons → Secrets, per Kaggle account — NOT the Render/Vercel/Freebuff
+  env): `NGROK_AUTHTOKEN_IMAGE`, `NGROK_AUTHTOKEN_VOICE`, `NGROK_AUTHTOKEN_OVERSEER` (one per ngrok
+  account), or a shared `NGROK_AUTHTOKEN`; plus `WORKER_REGISTRATION_TOKEN` only if Render sets it.
+  Optional: `OSTRA_API_URL`, `OSTRA_KEEPALIVE_MINUTES`.
+- **No new Render/Vercel env vars.** Render must be redeployed with Start Command
+  `bun --filter @ostra/api start`.
 
 ## 10. Next agent
 
-Redeploy the Render API, then **verify the channel end-to-end**: start one agent notebook from
-`/runner` (or manually on Kaggle), confirm it registers as worker type `image`/`voice`/`overseer`, open
-`/studio`, create a channel bound to a project, and run a round. Confirm that a real message is written
-to `agent_messages`, that a Script AI peer request is delivered to Image AI, and that the Showrunner
-reports the true status. Report any turn that fails with its real reason.
+1. Operator: fix the Render Start Command and redeploy (so `/api/agents/*` is live).
+2. Operator: add the per-agent ngrok tokens as **Kaggle secrets**, then re-push the notebooks
+   (`bun scripts/kaggle-agent-notebook.ts --agent=image --agent=voice --agent=overseer --apply`) or press
+   Run in Kaggle.
+3. Then verify the full loop: agents register **with** endpoints, open `/studio`, run a round, and confirm
+   a Script AI peer request is delivered to Image AI and the Showrunner reports the real status.
 
 ## 11. Do not redo
 
-- Do not re-apply migration `007` if `verify-supabase.mjs` lists `agent_messages`.
-- Do not re-create the three Kaggle kernels by hand; `bun scripts/kaggle-agent-notebook.ts --apply`
-  refreshes them idempotently.
-- Do not add `messages` handling in a second place — `parseAgentResponse` already owns it.
-- Do not introduce a new `ProviderId` for the overseer.
+- Do not re-apply migrations `007`/`008` if `verify-supabase.mjs` lists `agent_messages` and `overseer`
+  registrations succeed.
+- Do not re-create the kernels by hand; `--apply` refreshes them. Note the Showrunner kernel is
+  `ostra-showrunner-agent`.
+- Do not add `messages` parsing in a second place; `parseAgentResponse` owns it.
+- Do not re-fix the `--kernel-ref` precedence bug in `kaggle-live-check.ts` — it is fixed.
+- Do not give the notebooks a unique `ngrok` account token expectation beyond
+  `NGROK_AUTHTOKEN_<AGENT>` → `NGROK_AUTHTOKEN`.
 
 ## 12. Verification
 
-Unverified and must be stated as such:
+Verified live: all three agent notebooks run, load the model, serve `/health` 200, and register/heartbeat
+(the `overseer` registration was proven only after migration 008). Stated unverified:
 
-- No agent was ONLINE, so **no** round has been executed against a live model; the entire model-facing
-  path (channel prompt → call → parse → persist) is covered by unit tests only, not a live call.
-- The three new Kaggle notebooks have not been run; whether they load the model, tunnel and register is
-  unknown.
-- The `/studio` page has not been rendered against a live Render API (the routes are not deployed yet).
-- `chat_rooms.kind` / `agent_messages` existence is confirmed by `verify-supabase.mjs`; no ad-hoc row
-  reads were performed from this workspace.
+- **No agent is reachable** — none has a public endpoint (no ngrok token), so no channel round against a
+  live model has been executed; the model-facing prompt→call→parse→persist path is unit-tested only.
+- The `/studio` page has not been rendered against a live Render API (routes not deployed).
+- The image/audio **production** work (actual image generation, TTS) is not implemented in these
+  notebooks; they are the agents' reasoning/direction layer.

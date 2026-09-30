@@ -181,11 +181,15 @@ export function readinessCell(): string {
 }
 
 /** The ngrok tunnel cell, identical in behaviour to the Script AI notebook's managed tunnel cell. */
-export function tunnelCell(): string {
+export function tunnelCell(agent: AgentNotebookKind): string {
   return [
     "# ── Ostra Studio: public tunnel via ngrok (managed cell) ──",
     "# Opens the public URL the Ostra backend reaches this agent at. If ngrok fails, this reports it",
     "# and keeps going with PUBLIC_URL = None instead of aborting the run before the bootstrap cell.",
+    "#",
+    `# This agent looks for its OWN token first (NGROK_AUTHTOKEN_${agent.toUpperCase()}), then falls back to`,
+    "# NGROK_AUTHTOKEN. ngrok's free plan allows one tunnel at a time, so give each agent a token from a",
+    "# DIFFERENT ngrok account to run them together; all three can live in one Kaggle account's secrets.",
     "from kaggle_secrets import UserSecretsClient",
     "from pyngrok import ngrok",
     "",
@@ -193,7 +197,16 @@ export function tunnelCell(): string {
     "",
     "try:",
     "    secrets = UserSecretsClient()",
-    '    token = secrets.get_secret("NGROK_AUTHTOKEN")',
+    "    token = None",
+    `    for _name in ("NGROK_AUTHTOKEN_${agent.toUpperCase()}", "NGROK_AUTHTOKEN"):`,
+    "        try:",
+    "            token = secrets.get_secret(_name)",
+    "        except Exception:",
+    "            token = None",
+    "        if token:",
+    "            break",
+    "    if not token:",
+    `        raise RuntimeError("no ngrok token: set the Kaggle secret NGROK_AUTHTOKEN_${agent.toUpperCase()} (or NGROK_AUTHTOKEN)")`,
     "    ngrok.set_auth_token(token)",
     '    print("Ngrok authentication successful.")',
     "    tunnel = ngrok.connect(8000)",
@@ -228,13 +241,24 @@ export function buildAgentNotebook(agent: AgentNotebookKind, bootstrapTemplate: 
     pyCell(installCell()),
     pyCell(modelServerCell(agent)),
     pyCell(readinessCell()),
-    pyCell(tunnelCell()),
+    pyCell(tunnelCell(agent)),
     pyCell(renderAgentBootstrap(bootstrapTemplate, agent)),
   ];
-  return { nbformat: 4, nbformat_minor: 5, metadata: {}, cells };
+  // Cells need ids (nbformat >= 4.5) and the notebook needs a kernelspec, or Papermill aborts with
+  // "No kernel name found in notebook and no override provided" before a single cell runs.
+  const withIds = cells.map((c, i) => ({ ...c, id: `ostra-${agent}-${i}` }));
+  return {
+    nbformat: 4,
+    nbformat_minor: 5,
+    metadata: {
+      kernelspec: { display_name: "Python 3", language: "python", name: "python3" },
+      language_info: { name: "python", version: "3.12" },
+    },
+    cells: withIds,
+  };
 }
 
-type Args = { agents: AgentNotebookKind[]; apply: boolean; dump: boolean; owner: string | null; kernelRef: string | null };
+type Args = { agents: AgentNotebookKind[]; apply: boolean; dump: boolean; owner: string | null; kernelRef: string | null; slug: string | null };
 
 function parseArgs(argv: string[]): Args {
   const agents: AgentNotebookKind[] = [];
@@ -247,17 +271,44 @@ function parseArgs(argv: string[]): Args {
   }
   const ownerArg = argv.find((a) => a.startsWith("--owner="))?.slice("--owner=".length).trim();
   const refArg = argv.find((a) => a.startsWith("--kernel-ref="))?.slice("--kernel-ref=".length).trim();
-  return { agents: [...new Set(agents)], apply: argv.includes("--apply"), dump: argv.includes("--dump"), owner: ownerArg || null, kernelRef: refArg || null };
+  const slugArg = argv.find((a) => a.startsWith("--slug="))?.slice("--slug=".length).trim();
+  return { agents: [...new Set(agents)], apply: argv.includes("--apply"), dump: argv.includes("--dump"), owner: ownerArg || null, kernelRef: refArg || null, slug: slugArg || null };
 }
 
-async function pushKernel(authHeader: string, owner: string, agent: AgentNotebookKind, source: string): Promise<number> {
-  const slug = `${owner}/${agentKernelSlug(agent)}`;
+/** List this account's Ostra kernels with their last run time, so a stuck/missing kernel is visible. */
+export async function listKernels(authHeader: string): Promise<number> {
+  const url = `${KAGGLE_API}/kernels/list?group=profile&pageSize=100&search=ostra`;
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: { Authorization: authHeader }, signal: AbortSignal.timeout(15000) });
+  } catch (e) {
+    console.log(`  GET ${url} -> unreachable: ${e instanceof Error ? e.message : String(e)}`);
+    return 3;
+  }
+  console.log(`  GET ${url} -> HTTP ${res.status}`);
+  if (!res.ok) {
+    console.log(`  body: ${(await res.text().catch(() => "")).slice(0, 300)}`);
+    return res.status === 401 || res.status === 403 ? 3 : 1;
+  }
+  const data = (await res.json().catch(() => null)) as unknown;
+  const items: Array<Record<string, unknown>> = Array.isArray(data) ? (data as Array<Record<string, unknown>>) : ((data as { kernels?: Array<Record<string, unknown>> } | null)?.kernels ?? []);
+  for (const k of items) {
+    console.log(`  ${String(k.ref ?? k.slug ?? "?")} | lastRun=${String(k.lastRunTime ?? "never")} | title=${String(k.title ?? "-")}`);
+  }
+  if (items.length === 0) console.log("  (no kernels matching 'ostra')");
+  return 0;
+}
+
+async function pushKernel(authHeader: string, owner: string, agent: AgentNotebookKind, source: string, slugOverride?: string | null): Promise<number> {
+  const slug = `${owner}/${slugOverride || agentKernelSlug(agent)}`;
   const res = await fetch(`${KAGGLE_API}/kernels/push`, {
     method: "POST",
     headers: { Authorization: authHeader, "Content-Type": "application/json" },
     body: JSON.stringify({
       slug,
-      newTitle: `Ostra ${agent} agent`,
+      // Kaggle titles must be unique per account. `overseer` is presented as "Showrunner" to match the
+      // UI, which also keeps it distinct from a title an earlier failed create may still hold.
+      newTitle: agent === "overseer" ? "Ostra Showrunner agent" : `Ostra ${agent} agent`,
       text: source,
       language: "python",
       kernelType: "notebook",
@@ -288,14 +339,24 @@ export async function main(argv = process.argv): Promise<number> {
   console.log(`at ${new Date().toISOString()}\n`);
 
   const args = parseArgs(argv);
+  const cfg = kaggleConfig();
+  const apiToken = cfg.apiToken ?? process.env.KAGGLE_API_TOKEN?.trim();
+
+  if (argv.includes("--list")) {
+    if (!apiToken) {
+      console.log("  RESULT: NOT_CONFIGURED — KAGGLE_API_TOKEN is not set.");
+      return 2;
+    }
+    console.log("--- kernels on this account (search: ostra) ---");
+    return listKernels(getKaggleAuthHeader(apiToken));
+  }
+
   if (args.agents.length === 0) {
-    console.log(`  RESULT: NOT_CONFIGURED — pass one or more of ${AGENT_NOTEBOOK_KINDS.map((a) => `--${a}`).join(", ")}`);
+    console.log(`  RESULT: NOT_CONFIGURED — pass one or more of ${AGENT_NOTEBOOK_KINDS.map((a) => `--${a}`).join(", ")}, or --list`);
     return 2;
   }
 
   const bootstrap = readFileSync(BOOTSTRAP_PATH, "utf8");
-  const cfg = kaggleConfig();
-  const apiToken = cfg.apiToken ?? process.env.KAGGLE_API_TOKEN?.trim();
   const kernelRef = args.kernelRef ?? cfg.kernelRef ?? null;
   const { owner: refOwner } = kernelRef ? parseKernelRef(kernelRef) : { owner: null };
   const owner = args.owner ?? refOwner ?? DEFAULT_OWNER;
@@ -328,7 +389,7 @@ export async function main(argv = process.argv): Promise<number> {
   let exit = 0;
   for (const agent of args.agents) {
     const notebook = buildAgentNotebook(agent, bootstrap);
-    const code = await pushKernel(authHeader, owner, agent, JSON.stringify(notebook));
+    const code = await pushKernel(authHeader, owner, agent, JSON.stringify(notebook), args.slug);
     if (code !== 0) exit = code;
   }
   return exit;
