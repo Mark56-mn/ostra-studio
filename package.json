@@ -9,6 +9,7 @@
     "dev:web": "bun --filter @ostra/web dev",
     "dev:api": "bun --filter @ostra/api dev",
     "dev": "bun run dev:web",
+    "start": "bun --filter @ostra/api start",
     "build": "bun --filter @ostra/web build",
     "build:all": "bun --filter @ostra/web build && bun --filter @ostra/api build",
     "typecheck": "bun --filter @ostra/web typecheck && bun --filter @ostra/api build",

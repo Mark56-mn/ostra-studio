@@ -191,6 +191,8 @@ Render hosts `apps/api` from this Bun workspace. Known-good service settings:
 - **Build Command:** `bun install && bun --filter @ostra/api build` (`build` = `tsc --noEmit`, a typecheck — it emits no files).
 - **Start Command:** `bun --filter @ostra/api start` (equivalently, from `apps/api`: `node --import tsx src/index.ts`).
 - `PORT` is injected by Render; the app binds `0.0.0.0:$PORT` (local default `3001`).
+- The workspace root also exposes `bun start` → `bun --filter @ostra/api start`, so a package-manager
+  default start command (`npm start` / `yarn start` / `bun start`) resolves to the API rather than failing.
 
 ### Deploy-failure checklist
 
@@ -203,6 +205,12 @@ Render hosts `apps/api` from this Bun workspace. Known-good service settings:
   since TS 4.1 — `paths` resolve relative to the config file), so any TS ≥ 4.1 works.
 - A build that typechecks green locally but fails on Render almost always means an **unpinned tool**
   (global TS) or an **install that dropped devDependencies** — not a source error.
+- **Exit 127 at the START step, after `Build successful 🎉`, with
+  `bash: line 1: Yarn: command not found`** (observed 2026-09-30) — the service's **Start Command** is
+  unset or wrong, so Render fell back to a Yarn default it cannot run (the repo ships only `bun.lock`).
+  Fix: set **Start Command** to `bun --filter @ostra/api start` in the Render dashboard. Render is
+  operator-managed and there is **no `render.yaml`** in this repo, so this cannot be fixed in source; a
+  failed start also means the previous deploy keeps serving, i.e. the change is not live yet.
 
 ## Health contract
 
