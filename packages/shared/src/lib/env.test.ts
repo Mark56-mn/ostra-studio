@@ -3,6 +3,7 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import {
   colabConfig,
+  kaggleApiTokens,
   kaggleConfig,
   supabaseConfigReason,
   supabaseServerConfigured,
@@ -19,6 +20,17 @@ const TOUCHED = [
   "SUPABASE_ANON_KEY",
   "NEXT_PUBLIC_SUPABASE_ANON_KEY",
   "KAGGLE_API_TOKEN",
+  "KAGGLE_API_TOKEN_1",
+  "KAGGLE_API_TOKEN_2",
+  "KAGGLE_API_TOKEN_3",
+  "KAGGLE_API_TOKEN_4",
+  "KAGGLE_API_TOKEN_5",
+  "KAGGLE_API_TOKEN_10",
+  "KAGGLE_API_TOKEN_2_ALT",
+  "KAGGLE_API_TOKEN_BLANK",
+  "EMMANUEL_OFOYE_KAGGLE_API_TOKEN",
+  "KIDSCITY_KAGGLE_API_TOKEN",
+  "NGROK_AUTHTOKEN",
   "KAGGLE_KERNEL_REF",
   "KAGGLE_SCRIPT_URL",
   "GOOGLE_CLOUD_PROJECT",
@@ -141,6 +153,67 @@ describe("kaggle config", () => {
       assert.equal(c.configured, true);
       assert.equal(c.kernelRef, "bettertrade/notebook7eae283a4a");
     });
+  });
+
+  it("kaggleApiTokens: plain name first, then numbered in numeric order, blank skipped", () => {
+    withEnv(
+      {
+        KAGGLE_API_TOKEN: "user0:key0",
+        KAGGLE_API_TOKEN_1: "user1:key1",
+        KAGGLE_API_TOKEN_2: "user2:key2",
+      },
+      () => {
+        assert.deepEqual(kaggleApiTokens(), ["user0:key0", "user1:key1", "user2:key2"]);
+      }
+    );
+  });
+
+  it("kaggleApiTokens: numeric order beats lexical (10 after 2), blanks skipped, aliases merged", () => {
+    withEnv(
+      {
+        KAGGLE_API_TOKEN: "user0:key0",
+        KAGGLE_API_TOKEN_1: "user1:key1",
+        KAGGLE_API_TOKEN_2: "user2:key2",
+        KAGGLE_API_TOKEN_10: "user10:key10",
+        KAGGLE_API_TOKEN_2_ALT: "user1:key1", // duplicate value from another key name
+        KAGGLE_API_TOKEN_BLANK: "   ",
+      },
+      () => {
+        assert.deepEqual(kaggleApiTokens(), ["user0:key0", "user1:key1", "user2:key2", "user10:key10"]);
+      }
+    );
+  });
+
+  it("kaggleApiTokens: owner-labelled name (<NAME>_KAGGLE_API_TOKEN) is read, after numbered slots", () => {
+    withEnv(
+      {
+        KAGGLE_API_TOKEN_1: "bettertrade:key1",
+        EMMANUEL_OFOYE_KAGGLE_API_TOKEN: "emmanuelofoye:key4",
+        KIDSCITY_KAGGLE_API_TOKEN: "kidscity:key2",
+      },
+      () => {
+        // Order matters: numbered slots first so --token=1..3 keep meaning the same accounts.
+        assert.deepEqual(kaggleApiTokens(), ["bettertrade:key1", "emmanuelofoye:key4", "kidscity:key2"]);
+      },
+    );
+  });
+
+  it("kaggleApiTokens: empty env yields empty list (never a placeholder token)", () => {
+    withEnv({}, () => {
+      assert.deepEqual(kaggleApiTokens(), []);
+    });
+  });
+
+  it("kaggleConfig falls back to the first numbered token when the plain name is absent", () => {
+    withEnv(
+      { KAGGLE_API_TOKEN_1: "user1:key1", KAGGLE_API_TOKEN_2: "user2:key2", KAGGLE_KERNEL_REF: "bettertrade/notebook7eae283a4a" },
+      () => {
+        const c = kaggleConfig();
+        assert.equal(c.configured, true);
+        assert.equal(c.apiToken, "user1:key1");
+        assert.equal(c.kernelRef, "bettertrade/notebook7eae283a4a");
+      }
+    );
   });
 
   it("does not use the legacy KAGGLE_SCRIPT_URL", () => {

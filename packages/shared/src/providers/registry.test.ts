@@ -5,6 +5,11 @@ import { resolveRegistry } from "./registry.js";
 
 const KEYS = [
   "KAGGLE_API_TOKEN",
+  "KAGGLE_API_TOKEN_1",
+  "KAGGLE_API_TOKEN_2",
+  "KAGGLE_API_TOKEN_3",
+  "KAGGLE_API_TOKEN_4",
+  "NGROK_AUTHTOKEN",
   "KAGGLE_KERNEL_REF",
   "KAGGLE_SCRIPT_URL",
   "COLAB_IMAGE_URL",

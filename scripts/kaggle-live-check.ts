@@ -17,7 +17,7 @@
  * Exit codes: 0 verified | 2 NOT_CONFIGURED | 3 AUTH_FAILED/unreachable | 1 other failure
  */
 
-import { kaggleConfig } from "../packages/shared/src/lib/env";
+import { kaggleConfig, kaggleApiTokens } from "../packages/shared/src/lib/env";
 import {
   getKaggleAuthHeader,
   parseKernelRef,
@@ -46,6 +46,8 @@ async function main(): Promise<number> {
   const probeRefArg = process.argv.find((a) => a.startsWith("--kernel-ref="));
   const probeRef = probeRefArg ? probeRefArg.slice("--kernel-ref=".length).trim() : undefined;
   console.log(`  ${presence("KAGGLE_API_TOKEN", process.env.KAGGLE_API_TOKEN)}`);
+  console.log(`  ${presence("KAGGLE_API_TOKEN_1", process.env.KAGGLE_API_TOKEN_1)}`);
+  console.log(`  ${presence("KAGGLE_API_TOKEN_2", process.env.KAGGLE_API_TOKEN_2)}`);
   console.log(`  ${presence("KAGGLE_KERNEL_REF", process.env.KAGGLE_KERNEL_REF)}`);
   console.log(`  KAGGLE_EXEC_DISABLED=${process.env.KAGGLE_EXEC_DISABLED ?? "(unset)"}`);
 
@@ -61,7 +63,19 @@ async function main(): Promise<number> {
   // (e.g. an agent notebook) without changing KAGGLE_KERNEL_REF. Previously the env silently took
   // precedence, so --kernel-ref= was ignored whenever KAGGLE_KERNEL_REF was set.
   const kernelRefRaw = probeRef ?? cfg.kernelRef;
-  const apiToken = cfg.apiToken ?? process.env.KAGGLE_API_TOKEN?.trim();
+  // --token=<n> probes with a specific numbered token (1-based, as listed in the presence lines) —
+  // needed to read PRIVATE kernels that belong to the second account, not the first token's.
+  const tokenArg = process.argv.find((a) => a.startsWith("--token="))?.slice("--token=".length).trim();
+  const allTokens = kaggleApiTokens();
+  let apiToken = cfg.apiToken ?? allTokens[0];
+  if (tokenArg) {
+    const n = Number.parseInt(tokenArg, 10);
+    if (!Number.isInteger(n) || n < 1 || n > allTokens.length) {
+      console.log(`  --token=${tokenArg} is out of range: ${allTokens.length} token(s) configured.`);
+      return 2;
+    }
+    apiToken = allTokens[n - 1];
+  }
   if (!apiToken || !kernelRefRaw) {
     console.log("  No probe possible (needs a token AND --kernel-ref). No Kaggle request was attempted.");
     return 2;

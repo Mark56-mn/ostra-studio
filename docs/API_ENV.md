@@ -28,6 +28,9 @@ WORKER_HEARTBEAT_TIMEOUT_SEC=90
 # Kaggle Script AI — real execution via POST /api/v1/kernels/push (ApiSaveKernelRequest)
 # NO KAGGLE_SCRIPT_URL: the supervisor pushes the kernel and waits for worker registration + heartbeat.
 KAGGLE_API_TOKEN=...            # server-only, JSON {username,key} or username:key or KGAT_* Bearer, redacted
+KAGGLE_API_TOKEN_1=...          # more Kaggle account tokens (each owns ONE account). Priority: plain name
+KAGGLE_API_TOKEN_2=...          #   first, then _<n> in numeric order. Probed live before every push.
+KAGGLE_API_TOKEN_<name>=...     #   A valid-but-empty account reports authenticated, owner unknown.
 KAGGLE_KERNEL_REF=bettertrade/notebook7eae283a4a  # REQUIRED exact notebook ref (owner/slug)
 KAGGLE_EXEC_DISABLED=false      # true => probe-only, no push
 
@@ -205,6 +208,16 @@ notebook composes the install cell, a FastAPI OpenAI-compatible chat server on `
 `image` / `voice` / `overseer` and heartbeats. Nothing is faked: if the model fails to load, the server
 is down, the tunnel check records the real failure and the agent never comes ONLINE. The notebooks are
 created from the repo, so re-running the script refreshes them.
+
+**Multiple Kaggle accounts.** Every token owns exactly one account; the script reads
+`KAGGLE_API_TOKEN` then numbered/named tokens (`KAGGLE_API_TOKEN_1`, `_2`, …) via `kaggleApiTokens()`,
+probes the real account with an authenticated list call (kernels → datasets → models), and REFUSES to
+push when the probed owner does not match the target `--owner`/`--kernel-ref`. Flags: `--list` (all
+accounts, or `--list --token=<n>`), `--token=<n>` to pin ONE agent to one account, `--agent=all` to map
+agent #i → token #(i+1) (wrapping when there are more agents than tokens). A valid token whose account
+owns nothing (fresh account) reports authenticated with no owner; pushing there requires an explicit
+`--owner=<account>`, and Kaggle rejects a wrong account with a real 403. Never guesses an owner from a
+token's shape.
 
 Kaggle secrets each agent needs (Kaggle → Add-ons → Secrets; **not** the Render/Vercel env):
 `NGROK_AUTHTOKEN_IMAGE` / `NGROK_AUTHTOKEN_VOICE` / `NGROK_AUTHTOKEN_OVERSEER` (each from a different

@@ -3,6 +3,8 @@ const interesting = keys.filter(k => /RENDER|VERCEL|KAGGLE|COLAB|GOOGLE|NEXT_PUB
 console.log("INTERESTING_KEYS", interesting.sort().join(", "));
 console.log("ALL_KEYS_COUNT", keys.length);
 console.log("HAS_KAGGLE_API_TOKEN", !!process.env.KAGGLE_API_TOKEN);
+console.log("HAS_KAGGLE_API_TOKEN_1", !!process.env.KAGGLE_API_TOKEN_1);
+console.log("HAS_KAGGLE_API_TOKEN_2", !!process.env.KAGGLE_API_TOKEN_2);
 console.log("HAS_KAGGLE_KERNEL_REF", !!process.env.KAGGLE_KERNEL_REF, process.env.KAGGLE_KERNEL_REF ? process.env.KAGGLE_KERNEL_REF.slice(0,40) : "empty");
 console.log("HAS_NEXT_PUBLIC_API_URL", !!process.env.NEXT_PUBLIC_API_URL, process.env.NEXT_PUBLIC_API_URL ? process.env.NEXT_PUBLIC_API_URL.slice(0,60) : "empty");
 console.log("HAS_SUPABASE_URL", !!process.env.SUPABASE_URL);

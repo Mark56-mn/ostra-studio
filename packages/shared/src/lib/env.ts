@@ -70,8 +70,54 @@ export function flagAutoPublish(): boolean {
 // Real execution is a two-part requirement: an API token AND the kernel ref.
 export type KaggleConfig = { apiToken?: string; kernelRef?: string; configured: boolean; reason?: string };
 
+/**
+ * All configured Kaggle API tokens, in priority order.
+ *
+ * Kaggle tokens belong to ONE account each, and several accounts are in play (the agent notebooks
+ * may live under a different owner than the operator-managed Script AI kernel). The workspace may
+ * therefore hold several tokens under numbered/named keys:
+ *
+ *   KAGGLE_API_TOKEN          — original single-token name (still supported first for Render parity)
+ *   KAGGLE_API_TOKEN_1..9     — numbered tokens (1 is preferred when no plain name exists)
+ *   KAGGLE_API_TOKEN_<NAME>   — any other suffixed name (e.g. KAGGLE_API_TOKEN_BETTERTRADE)
+ *   <NAME>_KAGGLE_API_TOKEN   — labelled-by-owner variant (e.g. EMMANUEL_OFOYE_KAGGLE_API_TOKEN), read
+ *                             after the numbered/suffixed ones so slot numbers stay predictable
+ *
+ * Values are returned verbatim in config order and never logged; callers pick one and pass it
+ * through getKaggleAuthHeader(). An empty/blank value is skipped, not an error.
+ */
+export function kaggleApiTokens(): string[] {
+  const tokens: string[] = [];
+  const push = (v: string | undefined) => {
+    const t = clean(v);
+    if (t && !tokens.includes(t)) tokens.push(t);
+  };
+  push(process.env.KAGGLE_API_TOKEN);
+  const numbered: Array<{ key: string; n: number }> = [];
+  const named: string[] = [];
+  const labelled: string[] = [];
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith("KAGGLE_API_TOKEN")) {
+      const suffix = key.slice("KAGGLE_API_TOKEN".length);
+      if (!suffix) continue; // plain name already pushed
+      const m = /^_(\d+)$/.exec(suffix);
+      if (m) numbered.push({ key, n: Number(m[1]) });
+      else named.push(key);
+      continue;
+    }
+    // Operators also label tokens by account (EMMANUEL_OFOYE_KAGGLE_API_TOKEN). Accept that shape too,
+    // otherwise a correctly-pasted key is silently ignored and the agent looks "unconfigured".
+    if (key.length > "KAGGLE_API_TOKEN".length && key.endsWith("KAGGLE_API_TOKEN")) labelled.push(key);
+  }
+  numbered.sort((a, b) => a.n - b.n);
+  for (const { key } of numbered) push(process.env[key]);
+  for (const key of named.sort()) push(process.env[key]);
+  for (const key of labelled.sort()) push(process.env[key]);
+  return tokens;
+}
+
 export function kaggleConfig(): KaggleConfig {
-  const apiToken = clean(process.env.KAGGLE_API_TOKEN);
+  const apiToken = clean(process.env.KAGGLE_API_TOKEN) ?? kaggleApiTokens()[0];
   const kernelRef = clean(process.env.KAGGLE_KERNEL_REF);
   if (!apiToken && !kernelRef) {
     return { configured: false, reason: "Set KAGGLE_API_TOKEN and KAGGLE_KERNEL_REF on Render" };

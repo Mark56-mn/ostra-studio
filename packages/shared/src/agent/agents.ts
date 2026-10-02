@@ -50,7 +50,7 @@ export const AGENT_ROSTER: readonly AgentProfile[] = [
     workerType: "script",
     provider: "kaggle",
     runtime: "kaggle",
-    model: "Qwen/Qwen3-1.7B",
+    model: "Qwen/Qwen3-4B",
     capabilities: [
       "story_development",
       "script_writing",
@@ -71,7 +71,7 @@ export const AGENT_ROSTER: readonly AgentProfile[] = [
     workerType: "image",
     provider: "kaggle",
     runtime: "kaggle",
-    model: "Qwen/Qwen3-1.7B",
+    model: "Qwen/Qwen3-4B",
     capabilities: [
       "character_design",
       "visual_consistency",
@@ -90,7 +90,7 @@ export const AGENT_ROSTER: readonly AgentProfile[] = [
     workerType: "voice",
     provider: "kaggle",
     runtime: "kaggle",
-    model: "Qwen/Qwen3-1.7B",
+    model: "Qwen/Qwen3-4B",
     capabilities: [
       "narration_direction",
       "pacing",
@@ -109,7 +109,7 @@ export const AGENT_ROSTER: readonly AgentProfile[] = [
     workerType: "overseer",
     provider: "kaggle",
     runtime: "kaggle",
-    model: "Qwen/Qwen3-1.7B",
+    model: "Qwen/Qwen3-4B",
     capabilities: ["oversight", "conflict_detection", "status_reporting", "handoff_summary"],
     specialty: "Oversees the channel, resolves conflicts and reports the real status to the director.",
     promptRole:

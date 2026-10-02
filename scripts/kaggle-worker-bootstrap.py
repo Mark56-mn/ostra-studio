@@ -60,7 +60,9 @@ WORKER = {
     "worker_type": "script",
     "runtime": "kaggle",
     "provider": "kaggle",
-    "model": "Qwen/Qwen3-1.7B",
+    # Report the model actually booted (the model load cell resolves MODEL_ID before this cell
+    # runs). "unknown" means no model cell ran — never claim a model that is not really serving.
+    "model": (globals().get("MODEL_ID") or "unknown"),
     "capabilities": [
         "story_development",
         "script_writing",
@@ -151,6 +153,7 @@ def _register():
 _log(f"[ostra] worker_id={WORKER['worker_id']} -> {API_URL}")
 _log(f"[ostra] endpoint={ENDPOINT or '(no tunnel URL — PUBLIC_URL not set)'}")
 _log(f"[ostra] registration token locally: {'set' if TOKEN else 'NOT set'}")
+_log(f"[ostra] model={WORKER['model']}")
 
 # 1) Prove the public tunnel before claiming anything about the worker.
 _tunnel_check()

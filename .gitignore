@@ -33,3 +33,7 @@ coverage
 .DS_Store
 .idea
 *.tgz
+
+# python (the Kaggle bootstrap scripts are byte-compiled during local checks)
+__pycache__/
+*.pyc

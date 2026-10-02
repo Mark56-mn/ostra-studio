@@ -40,6 +40,9 @@ STATUS_PATH = "ostra-status.json"
 LOG_PATH = "ostra-bootstrap.log"
 
 # ── agent identity (managed by scripts/kaggle-agent-notebook.ts) ──
+# A deliberate model pin is injected by the generator as OSTRA_MODEL_DEFAULT into the model server
+# cell. The bootstrap must NOT define it here — that would shadow the reporting chain below and
+# make registration claim a model the runtime never booted.
 OSTRA_AGENT = "image"
 
 # Per-role identity. The backend stores an agent as a worker of this `type`, so the channel can pick
@@ -48,7 +51,7 @@ AGENT_PROFILES = {
     "script": {
         "worker_id": "script-ai-kaggle",
         "worker_type": "script",
-        "model": "Qwen/Qwen3-1.7B",
+        "model": "Qwen/Qwen3-4B",
         "capabilities": [
             "story_development", "script_writing", "scene_planning", "dialogue",
             "narration_text", "image_prompts", "story_continuity",
@@ -57,7 +60,7 @@ AGENT_PROFILES = {
     "image": {
         "worker_id": "image-ai-kaggle",
         "worker_type": "image",
-        "model": "Qwen/Qwen3-1.7B",
+        "model": "Qwen/Qwen3-4B",
         "capabilities": [
             "character_design", "visual_consistency", "scene_composition",
             "image_prompting", "style_bible",
@@ -66,7 +69,7 @@ AGENT_PROFILES = {
     "voice": {
         "worker_id": "voice-ai-kaggle",
         "worker_type": "voice",
-        "model": "Qwen/Qwen3-1.7B",
+        "model": "Qwen/Qwen3-4B",
         "capabilities": [
             "narration_direction", "pacing", "dialogue_timing", "audio_mix", "scene_alignment",
         ],
@@ -74,7 +77,7 @@ AGENT_PROFILES = {
     "overseer": {
         "worker_id": "showrunner-ai-kaggle",
         "worker_type": "overseer",
-        "model": "Qwen/Qwen3-1.7B",
+        "model": "Qwen/Qwen3-4B",
         "capabilities": ["oversight", "conflict_detection", "status_reporting", "handoff_summary"],
     },
 }
@@ -110,7 +113,9 @@ WORKER = {
     "worker_type": _PROFILE["worker_type"],
     "runtime": "kaggle",
     "provider": "kaggle",
-    "model": (_secret("OSTRA_MODEL") or _PROFILE["model"]),
+    # Report the model ACTUALLY booted: the model server cell resolves MODEL_ID before this cell
+    # runs. The secret/profile are fallbacks for a standalone run — never a claim about the runtime.
+    "model": (globals().get("MODEL_ID") or _secret("OSTRA_MODEL") or _PROFILE["model"]),
     "capabilities": _PROFILE["capabilities"],
     "status": "ONLINE",
 }
@@ -150,13 +155,13 @@ def _write_status():
         pass
 
 
-def _post(path, payload):
+def _post(path, payload, timeout=20):
     """POST to the Ostra API. Returns (status_code, body_text); raises only on transport errors."""
     response = requests.post(
         API_URL + path,
         headers={"Content-Type": "application/json", "x-worker-token": TOKEN},
         data=json.dumps(payload),
-        timeout=20,
+        timeout=timeout,
     )
     return response.status_code, response.text
 
@@ -181,7 +186,7 @@ def _tunnel_check():
     return result
 
 
-def _register():
+def _register(attempts=3):
     payload = dict(WORKER)
     payload["endpoint"] = ENDPOINT
     payload["metadata"] = {
@@ -189,10 +194,20 @@ def _register():
         "runtime_note": "kaggle notebook (agent channel)",
         "tunnel_health": STATUS["tunnel_health"],
     }
-    return _post("/api/workers/register", payload)
-
+    # Render's free tier can take longer than a single short read timeout to answer a cold POST, and
+    # a slow answer is not a failure. Retry the transport instead of declaring the agent OFFLINE.
+    last = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return _post("/api/workers/register", payload, timeout=45)
+        except Exception as exc:
+            last = exc
+            _log(f"[ostra] register attempt {attempt}/{attempts} failed ({exc}) — retrying")
+            time.sleep(10)
+    raise last
 
 _log(f"[ostra] agent={OSTRA_AGENT} worker_id={WORKER['worker_id']} -> {API_URL}")
+_log(f"[ostra] model={WORKER['model']}")
 _log(f"[ostra] endpoint={ENDPOINT or '(no tunnel URL — PUBLIC_URL not set)'}")
 _log(f"[ostra] registration token locally: {'set' if TOKEN else 'NOT set'}")
 

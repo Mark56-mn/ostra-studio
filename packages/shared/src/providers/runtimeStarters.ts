@@ -2,6 +2,8 @@
 // Abstraction for starting external runtimes. The orchestrator/scheduler depends on this,
 // not on Kaggle/Colab-specific code paths.
 
+import { kaggleConfig } from "../lib/env";
+
 export type RuntimeStartInput = {
   worker_type: string;   // script | image | voice
   runtime: string;       // kaggle | colab | …
@@ -24,12 +26,13 @@ export interface RuntimeStarter {
 }
 
 // ── Secrets redaction ─────────────────────────────────────────────────────────
-const SECRET_KEYS = new Set(["token","api_token","kaggle_api_token","KAGGLE_API_TOKEN","KAGGLE_KERNEL_REF","password","secret","authorization","access_token","oauth_token","service_account","private_key"]);
+const SECRET_KEYS = new Set(["token","api_token","kaggle_api_token","KAGGLE_API_TOKEN","KAGGLE_KERNEL_REF","password","secret","authorization","access_token","oauth_token","service_account","private_key","ngrok_authtoken","NGROK_AUTHTOKEN"]);
 export function redactSecrets(obj: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
   if (!obj || typeof obj !== "object") return obj ?? null;
   const out: Record<string, unknown> = { ...obj };
   for (const k of Object.keys(out)) {
-    if (SECRET_KEYS.has(k) || SECRET_KEYS.has(k.toLowerCase())) out[k] = "[REDACTED]";
+    // Numbered/named Kaggle tokens (KAGGLE_API_TOKEN_1, _2, _BETTERTRADE, …) are as secret as the plain name.
+    if (SECRET_KEYS.has(k) || SECRET_KEYS.has(k.toLowerCase()) || k.startsWith("KAGGLE_API_TOKEN") || k.endsWith("KAGGLE_API_TOKEN")) out[k] = "[REDACTED]";
     // also redact values that look like tokens
     const v = out[k];
     if (typeof v === "string" && v.length > 40 && /(KGAT_|ya29\.|1\/\/|eyJ)/.test(v)) out[k] = "[REDACTED]";
@@ -69,7 +72,8 @@ export function getKaggleAuthHeader(token: string): string {
   return `Bearer ${t}`;
 }
 
-function inferKaggleOwnerFromToken(token: string): string | null {
+/** The Kaggle account a credential belongs to, when the token embeds it (JSON or user:key). */
+export function inferKaggleOwnerFromToken(token: string): string | null {
   const t = token.trim();
   if (t.startsWith("{")) {
     try {
@@ -196,7 +200,8 @@ export class KaggleRuntimeStarter implements RuntimeStarter {
 
   async start(input: RuntimeStartInput): Promise<RuntimeStartOutcome> {
     const kernelRefRaw = (input.config?.["kernelRef"] as string) ?? this.cfg.kernelRef ?? process.env.KAGGLE_KERNEL_REF ?? "";
-    const token = this.cfg.apiToken ?? (process.env.KAGGLE_API_TOKEN as string | undefined) ?? "";
+    // kaggleConfig() resolves the plain name first, then numbered/named tokens (KAGGLE_API_TOKEN_1, …).
+    const token = this.cfg.apiToken ?? kaggleConfig().apiToken ?? "";
 
     if (!kernelRefRaw) {
       return { ok: false, error: "KAGGLE_KERNEL_REF not configured (e.g. mark56/studio-script-kernel or notebook7eae283a4a)", code: "NOT_AUTOSTARTABLE", provider_response: { reason: "missing_kernel_ref" } };

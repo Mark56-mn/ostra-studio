@@ -62,6 +62,14 @@ describe("runtimeStarters", () => {
     assert.equal(r!["kernelRef"], "keep");
   });
 
+  it("redactSecrets scrubs numbered Kaggle token names too", () => {
+    const r = redactSecrets({ KAGGLE_API_TOKEN_1: "s1", KAGGLE_API_TOKEN_2: "s2", KAGGLE_KERNEL_REF: "keep", note: "plain" });
+    assert.equal(r!["KAGGLE_API_TOKEN_1"], "[REDACTED]");
+    assert.equal(r!["KAGGLE_API_TOKEN_2"], "[REDACTED]");
+    assert.equal(r!["KAGGLE_KERNEL_REF"], "[REDACTED]");
+    assert.equal(r!["note"], "plain");
+  });
+
   it("redactSecrets handles lowercase token keys", () => {
     const r = redactSecrets({ token: "abc", api_token: "def", password: "ghi", safe: "keep" });
     assert.equal(r!["token"], "[REDACTED]");
@@ -158,7 +166,7 @@ describe("runtimeStarters", () => {
   // ── Kaggle: mocked fetch — success path ───────────────────────
   it("Kaggle push success returns real provider_run_id with versionNumber (no synthetic)", async () => {
     // env setup
-    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_KERNEL_REF", "KAGGLE_EXEC_DISABLED"] as const;
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2", "KAGGLE_KERNEL_REF", "KAGGLE_EXEC_DISABLED"] as const;
     saveEnv([...envKeys]);
     process.env.KAGGLE_API_TOKEN = "testuser:testkey";
     delete process.env.KAGGLE_EXEC_DISABLED;
@@ -225,7 +233,7 @@ describe("runtimeStarters", () => {
   });
 
   it("Kaggle push success without versionNumber uses ref/url as provider_run_id (still real)", async () => {
-    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_EXEC_DISABLED"] as const;
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2", "KAGGLE_EXEC_DISABLED"] as const;
     saveEnv([...envKeys]);
     process.env.KAGGLE_API_TOKEN = "user:key";
     delete process.env.KAGGLE_EXEC_DISABLED;
@@ -258,7 +266,7 @@ describe("runtimeStarters", () => {
   });
 
   it("Kaggle auth check failure 401 => AUTH_FAILED (verify step)", async () => {
-    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_EXEC_DISABLED"] as const;
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2", "KAGGLE_EXEC_DISABLED"] as const;
     saveEnv([...envKeys]);
     process.env.KAGGLE_API_TOKEN = "bad:token";
     delete process.env.KAGGLE_EXEC_DISABLED;
@@ -284,7 +292,7 @@ describe("runtimeStarters", () => {
   });
 
   it("Kaggle push 401 => AUTH_FAILED (push step)", async () => {
-    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_EXEC_DISABLED"] as const;
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2", "KAGGLE_EXEC_DISABLED"] as const;
     saveEnv([...envKeys]);
     process.env.KAGGLE_API_TOKEN = "user:key2";
     delete process.env.KAGGLE_EXEC_DISABLED;
@@ -309,7 +317,7 @@ describe("runtimeStarters", () => {
   });
 
   it("Kaggle push validation failure when kernelText missing is not synthetic success", async () => {
-    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_EXEC_DISABLED"] as const;
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2", "KAGGLE_EXEC_DISABLED"] as const;
     saveEnv([...envKeys]);
     process.env.KAGGLE_API_TOKEN = "user:key3";
     delete process.env.KAGGLE_EXEC_DISABLED;
@@ -348,7 +356,7 @@ describe("runtimeStarters", () => {
   });
 
   it("Kaggle legacy notebook id resolution still results in real push (mocked)", async () => {
-    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_EXEC_DISABLED"] as const;
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2", "KAGGLE_EXEC_DISABLED"] as const;
     saveEnv([...envKeys]);
     // Token JSON form with username
     const tokenJson = JSON.stringify({ username: "testuser2", key: "key2" });
@@ -389,7 +397,7 @@ describe("runtimeStarters", () => {
     // Regression: the LIVE Kaggle push API returns ref="/code/bettertrade/notebook7eae283a4a".
     // Committing that verbatim would make provider_run_id a form that never matches leases,
     // history, provider health or worker registration (all of which use owner/slug).
-    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_KERNEL_REF", "KAGGLE_EXEC_DISABLED"] as const;
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2", "KAGGLE_KERNEL_REF", "KAGGLE_EXEC_DISABLED"] as const;
     saveEnv([...envKeys]);
     const token = "bettertrade:bettertrade-key-for-test";
     const kernelRef = "bettertrade/notebook7eae283a4a";
@@ -428,7 +436,7 @@ describe("runtimeStarters", () => {
   });
 
   it("Kaggle bettertrade/notebook7eae283a4a real push returns real provider_run_id @vN with no synthetic", async () => {
-    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_KERNEL_REF", "KAGGLE_EXEC_DISABLED"] as const;
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2", "KAGGLE_KERNEL_REF", "KAGGLE_EXEC_DISABLED"] as const;
     saveEnv([...envKeys]);
     // Exact verified notebook for §38 — owner/slug form must bypass legacy resolution and push truly
     const token = "bettertrade:bettertrade-key-for-test";
@@ -480,7 +488,7 @@ describe("runtimeStarters", () => {
   });
 
   it("Kaggle regression: uses the pull endpoint and never the invalid mine=true field", async () => {
-    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_EXEC_DISABLED"] as const;
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2", "KAGGLE_EXEC_DISABLED"] as const;
     saveEnv([...envKeys]);
     process.env.KAGGLE_API_TOKEN = "u:k";
     delete process.env.KAGGLE_EXEC_DISABLED;
@@ -532,7 +540,7 @@ describe("runtimeStarters", () => {
   });
 
   it("Kaggle unreachable kernel source fails truthfully and never calls push", async () => {
-    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_EXEC_DISABLED"] as const;
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2", "KAGGLE_EXEC_DISABLED"] as const;
     saveEnv([...envKeys]);
     process.env.KAGGLE_API_TOKEN = "u:k";
     delete process.env.KAGGLE_EXEC_DISABLED;
@@ -775,7 +783,7 @@ describe("runtimeStarters", () => {
 
   // ── General invariants ──────────────────────────────────────────
   it("Kaggle provider_run_id invariant: never synthetic even on retries", async () => {
-    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_EXEC_DISABLED"] as const;
+    const envKeys = ["KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2", "KAGGLE_EXEC_DISABLED"] as const;
     saveEnv([...envKeys]);
     process.env.KAGGLE_API_TOKEN = "u:k";
     delete process.env.KAGGLE_EXEC_DISABLED;
