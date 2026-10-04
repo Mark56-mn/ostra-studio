@@ -25,41 +25,78 @@ export type ModelCatalogEntry = {
   description: string;
   /** Provider label as reported by provider health (e.g. `kaggle`, `colab-image`, `ffmpeg`). */
   provider: string;
-  /** Runtime that hosts it (e.g. `kaggle`, `colab`, `local`, `api`). */
+  /**
+   * Runtime that hosts it (e.g. `kaggle`, `colab`, `local`, `api`). This is the **planned/autostart**
+   * home; the runtime a worker actually registered on is reported by health (`health.detail.runtime`)
+   * and surfaced as `liveModel`'s siblings on the model row.
+   */
   runtime: string;
+  /**
+   * Can the orchestrator start this slot itself (Run Now / scheduler tick)? Only Script AI can: it is
+   * the one notebook wired to `KAGGLE_KERNEL_REF`. The other agents live on their own Kaggle
+   * notebooks that a human starts, so pressing Run Now for them must be refused with the real reason
+   * rather than re-pushing somebody else's kernel.
+   */
+  autostart: boolean;
+  /** The exact blocker when `autostart` is false. Never a secret. */
+  autostartNote?: string;
 };
 
 /**
  * Which models exist right now. This mirrors the real provider definitions in
  * apps/api/src/lib/providerHealth.ts — the health, never this list, decides ONLINE.
+ *
+ * The four AI agents (script / image / voice / overseer) are real Kaggle notebooks in production
+ * and each serves Qwen3-4B on the Kaggle T4 (14.6 GiB). The catalog names the *intended* model; the
+ * model a worker actually loaded is reported by the worker itself in `health.detail.model` and
+ * surfaced as `liveModel` (see liveModelFromHealth).
  */
 export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
   {
-    key: "script-qwen3-1-7b",
+    key: "script-qwen3-4b",
     providerId: "script",
-    modelRef: "qwen3-1-7b",
-    label: "Script AI · Qwen3 1.7B",
+    modelRef: "qwen3-4b",
+    label: "Script AI · Qwen3 4B",
     description: "Story development, scripts, scene breakdowns and narration text.",
     provider: "kaggle",
     runtime: "kaggle",
+    autostart: true,
   },
   {
-    key: "image-colab-image",
+    key: "image-qwen3-4b",
     providerId: "image",
-    modelRef: "colab-image",
-    label: "Image AI · Colab",
+    modelRef: "qwen3-4b",
+    label: "Image AI · Qwen3 4B",
     description: "Character, environment and scene artwork plus thumbnails.",
-    provider: "colab-image",
-    runtime: "colab",
+    provider: "kaggle",
+    runtime: "kaggle",
+    autostart: false,
+    autostartNote:
+      "Image AI runs from its own Kaggle notebook (emmanuelofoye/ostra-image-agent), which a human starts in Kaggle. Run Now cannot start it: no managed runtime is configured for it, and the only other start path would re-push the Script AI kernel.",
   },
   {
-    key: "voice-kokoro-82m",
+    key: "voice-qwen3-4b",
     providerId: "voice",
-    modelRef: "kokoro-82m",
-    label: "Voice AI · Kokoro-82M",
+    modelRef: "qwen3-4b",
+    label: "Voice AI · Qwen3 4B",
     description: "Narration, dialogue and scene audio at segment level.",
-    provider: "kokoro-82m",
-    runtime: "colab",
+    provider: "kaggle",
+    runtime: "kaggle",
+    autostart: false,
+    autostartNote:
+      "Voice AI runs from its own Kaggle notebook (bettertrade/ostra-voice-agent), which a human starts in Kaggle. Run Now cannot start it for the same reason as Image AI.",
+  },
+  {
+    key: "overseer-qwen3-4b",
+    providerId: "overseer",
+    modelRef: "qwen3-4b",
+    label: "Showrunner · Qwen3 4B",
+    description: "Oversees the agent channel, resolves conflicts and reports real status to the director.",
+    provider: "kaggle",
+    runtime: "kaggle",
+    autostart: false,
+    autostartNote:
+      "The Showrunner runs from kidscity/ostra-showrunner-agent, started by hand in Kaggle. Run Now cannot start it and must never re-push the Script AI kernel as a Showrunner.",
   },
   {
     key: "video-ffmpeg",
@@ -69,6 +106,8 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     description: "Deterministic assembly: images + audio, subtitles, transitions, encode.",
     provider: "ffmpeg",
     runtime: "local",
+    autostart: false,
+    autostartNote: "Video rendering (FFmpeg) is not deployed yet",
   },
   {
     key: "youtube-youtube-api",
@@ -78,8 +117,21 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     description: "Uploads approved videos. Requires OAuth; human approval still gates publishing.",
     provider: "youtube-api",
     runtime: "api",
+    autostart: false,
+    autostartNote: "YouTube OAuth is not configured",
   },
 ] as const;
+
+/**
+ * The honest refusal for a Run Now request against a slot the orchestrator cannot start itself.
+ * Returns null when the slot may be started (or is not switchable), so the caller can let the normal
+ * path run. Pure, so the rule is unit-tested without starting anything.
+ */
+export function autostartRefusal(providerSlot: string | null | undefined): string | null {
+  const entry = modelForProvider(providerSlot);
+  if (!entry || entry.autostart) return null;
+  return entry.autostartNote ?? `${entry.label} has no autostart path configured`;
+}
 
 /** Build the canonical key for a provider slot + model ref. Pure, lowercases and hyphenates. */
 export function modelKey(providerId: string, modelRef: string): string {
@@ -94,6 +146,34 @@ export function findModel(key: string | null | undefined): ModelCatalogEntry | n
   if (!key) return null;
   const k = key.trim().toLowerCase();
   return MODEL_CATALOG.find((m) => m.key === k) ?? null;
+}
+
+/**
+ * Stored switch keys from before the agent notebooks moved to Qwen3-4B on Kaggle, mapped to the
+ * catalog key that replaced them. An operator's ON/OFF intent must survive a model upgrade instead
+ * of being silently dropped with the retired key.
+ */
+export const LEGACY_MODEL_KEYS: Readonly<Record<string, string>> = {
+  "script-qwen3-1-7b": "script-qwen3-4b",
+  "image-colab-image": "image-qwen3-4b",
+  "voice-kokoro-82m": "voice-qwen3-4b",
+};
+
+/** Normalize a stored switch key: current key unchanged, retired key → its successor, else null. */
+export function resolveStoredModelKey(key: string | null | undefined): string | null {
+  if (!key) return null;
+  const k = key.trim().toLowerCase();
+  if (MODEL_CATALOG.some((m) => m.key === k)) return k;
+  return LEGACY_MODEL_KEYS[k] ?? null;
+}
+
+/**
+ * The model a live worker actually reported (e.g. "Qwen/Qwen3-4B"), or null when no worker row is
+ * attached to the health. Never inferred from configuration.
+ */
+export function liveModelFromHealth(health: ProviderHealth | null | undefined): string | null {
+  const model = health?.detail?.["model"];
+  return typeof model === "string" && model.trim() !== "" ? model.trim() : null;
 }
 
 /** The catalog entry matching a provider slot, or null when the slot is not switchable. */
@@ -134,6 +214,8 @@ export type ModelView = {
   dispatch: ModelDispatchState;
   /** Real provider health. May be null when the report could not be collected. */
   health: ProviderHealth | null;
+  /** The model the live worker reported, when one has registered. Null ⇒ not observed. */
+  liveModel?: string | null;
   /** Optional operator note persisted with the toggle. */
   note?: string | null;
   /** When the toggle was last changed (null ⇒ never changed, still on by default). */

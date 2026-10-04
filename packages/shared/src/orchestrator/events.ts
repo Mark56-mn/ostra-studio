@@ -1,7 +1,8 @@
 // Event helpers — shape audit events consistently.
 // The real persistence is api/events (Supabase). These helpers keep callers honest.
 
-import type { EventType } from "../domain/schemas.js";
+// Extensionless so the web app's webpack bundler can resolve it (see src/module-resolution.test.ts).
+import type { EventType } from "../domain/schemas";
 
 export function eventPayload(type: EventType, data: Record<string, unknown> = {}): { type: EventType; payload: Record<string, unknown> } {
   return { type, payload: { ...data, at: new Date().toISOString() } };

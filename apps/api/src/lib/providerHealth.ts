@@ -4,6 +4,7 @@ import {
   colabConfig,
   deriveProviderHealth,
   getServerSupabase,
+  kaggleApiTokens,
   kaggleConfig,
   summarizeHealth,
   type ProviderHealth,
@@ -72,13 +73,22 @@ async function loadAttempts(supa: SupabaseClient | null): Promise<AttemptRow[]> 
 const LIVE_STATUSES = ["ONLINE", "IDLE", "WORKING", "QUEUED", "WAITING"];
 const FAILED_STATUSES = ["FAILED", "RETRYING"];
 
-/** Prefer a live, freshly-heartbeating worker over a stale/failed row for the same type+runtime. */
-function pickWorker(
+/**
+ * Prefer a live, freshly-heartbeating worker over a stale/failed row for the same type+runtime.
+ *
+ * `runtimes` empty means "whatever runtime this agent actually registered on". That matters because
+ * an agent notebook is a real worker row wherever it runs: pinning a slot to one runtime (e.g. image
+ * => "colab") makes a live Kaggle Image worker invisible and reports NOT_CONFIGURED for a runtime
+ * that was never the production plan.
+ */
+export function pickWorker(
   workers: WorkerHealthRow[],
   type: string,
-  runtime: string
+  runtimes: string[]
 ): WorkerHealthRow | null {
-  const candidates = workers.filter((w) => w.type === type && (runtime ? w.runtime === runtime : true));
+  const candidates = workers.filter(
+    (w) => w.type === type && (runtimes.length === 0 || runtimes.includes(w.runtime ?? ""))
+  );
   if (candidates.length === 0) return null;
   const rank = (w: WorkerHealthRow) => {
     const s = (w.status ?? "").toUpperCase();
@@ -99,54 +109,98 @@ function pickWorker(
 }
 
 /** Attempts arrive newest-first, so the first match per (type, runtime) is the latest. */
-function latestAttempt(attempts: AttemptRow[], type: string, runtime: string): AttemptRow | null {
-  return attempts.find((a) => a.worker_type === type && a.runtime === runtime) ?? null;
+function latestAttempt(attempts: AttemptRow[], type: string, runtimes: string[]): AttemptRow | null {
+  return (
+    attempts.find(
+      (a) =>
+        a.worker_type === type &&
+        (runtimes.length === 0 || runtimes.includes(a.runtime ?? ""))
+    ) ?? null
+  );
 }
 
-type ProviderDef = {
+export type ProviderDef = {
   id: ProviderId;
+  /** The `workers.type` that serves this slot. */
   type: string;
-  runtime: string;
+  /** Runtimes that may serve it. Empty ⇒ accept the runtime the worker actually registered on. */
+  runtimes: string[];
+  /** Provider label used until a real worker row reports its own. */
   provider: string;
   configured: boolean;
   configReason?: string;
   extraDetail?: Record<string, unknown>;
 };
 
-function providerDefinitions(): ProviderDef[] {
+/**
+ * The four AI agent slots (script / image / voice / overseer) are hosted as Kaggle notebooks in
+ * production, with Colab kept as the alternative runtime. `runtimes: []` makes the health follow the
+ * REAL worker row instead of a hard-coded runtime name, so a live agent is reported as live.
+ */
+function agentSlot(
+  id: ProviderId,
+  type: string,
+  opts: { kaggleConfigured: boolean; kaggleReason: string; altConfigured: boolean; altReason: string; altProvider: string; extraDetail?: Record<string, unknown> }
+): ProviderDef {
+  const configured = opts.kaggleConfigured || opts.altConfigured;
+  const configReason = configured
+    ? undefined
+    : `${opts.kaggleReason} (Kaggle agent notebook) — or ${opts.altReason}`;
+  return {
+    id,
+    type,
+    runtimes: [],
+    provider: opts.kaggleConfigured ? "kaggle" : opts.altProvider,
+    configured,
+    configReason,
+    ...(opts.extraDetail ? { extraDetail: opts.extraDetail } : {}),
+  };
+}
+
+export function providerDefinitions(): ProviderDef[] {
   const kaggle = kaggleConfig();
   const image = colabConfig("image");
   const voice = colabConfig("voice");
+  const kaggleReason = kaggle.reason ?? "Set KAGGLE_API_TOKEN on Render";
+  // The agent notebooks (image / voice / overseer) are started from their own Kaggle accounts, so a
+  // token alone is the configuration signal for them — the script KAGGLE_KERNEL_REF is not.
+  const kaggleForAgents = kaggleApiTokens().length > 0;
+
   return [
     {
       id: "script",
       type: "script",
-      runtime: "kaggle",
+      runtimes: [],
       provider: "kaggle",
       configured: kaggle.configured,
       configReason: kaggle.reason,
       extraDetail: { kernelRef: kaggle.kernelRef ?? null },
     },
-    {
-      id: "image",
-      type: "image",
-      runtime: "colab",
-      provider: "colab-image",
-      configured: image.configured,
-      configReason: image.reason,
-    },
-    {
-      id: "voice",
-      type: "voice",
-      runtime: "colab",
-      provider: "kokoro-82m",
-      configured: voice.configured,
-      configReason: voice.reason,
-    },
+    agentSlot("image", "image", {
+      kaggleConfigured: kaggleForAgents,
+      kaggleReason,
+      altConfigured: image.configured,
+      altReason: image.reason ?? "the Colab Image runtime is not configured",
+      altProvider: "colab-image",
+    }),
+    agentSlot("voice", "voice", {
+      kaggleConfigured: kaggleForAgents,
+      kaggleReason,
+      altConfigured: voice.configured,
+      altReason: voice.reason ?? "the Colab Voice runtime is not configured",
+      altProvider: "kokoro-82m",
+    }),
+    agentSlot("overseer", "overseer", {
+      kaggleConfigured: kaggleForAgents,
+      kaggleReason,
+      altConfigured: false,
+      altReason: "the Showrunner runs on its own Kaggle notebook",
+      altProvider: "kaggle",
+    }),
     {
       id: "video",
       type: "video",
-      runtime: "local",
+      runtimes: ["local"],
       provider: "ffmpeg",
       configured: false,
       configReason: "Video rendering (FFmpeg) is not deployed yet",
@@ -154,7 +208,7 @@ function providerDefinitions(): ProviderDef[] {
     {
       id: "youtube",
       type: "youtube",
-      runtime: "api",
+      runtimes: ["api"],
       provider: "youtube-api",
       configured: false,
       configReason: "YouTube OAuth is not configured",
@@ -174,18 +228,22 @@ async function collectAll(supa: SupabaseClient | null): Promise<{
 
   const providers: Record<string, ProviderHealthEntry> = {};
   for (const def of providerDefinitions()) {
+    const worker = pickWorker(workers, def.type, def.runtimes);
+    // A real worker row is the only thing that may overrule the planned provider/runtime label.
+    const provider = worker?.provider ?? def.provider;
+    const runtime = worker?.runtime ?? def.runtimes[0] ?? provider;
     const health = deriveProviderHealth({
       id: def.id,
-      provider: def.provider,
+      provider,
       configured: def.configured,
       configReason: def.configReason,
-      worker: pickWorker(workers, def.type, def.runtime),
-      attempt: latestAttempt(attempts, def.type, def.runtime),
+      worker,
+      attempt: latestAttempt(attempts, def.type, def.runtimes),
     });
     providers[def.id] = {
       id: def.id,
-      provider: def.provider,
-      runtime: def.runtime,
+      provider,
+      runtime,
       health: def.extraDetail ? { ...health, detail: { ...(health.detail ?? {}), ...def.extraDetail } } : health,
     };
   }

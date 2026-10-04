@@ -686,3 +686,100 @@ Not proven / still open:
 - Voice AI: registered ONLINE on Qwen3-4B (v6, §28) but never had a tunnel (zero attached secrets).
 - Reminder still standing: `kidscity/ostra-image-agent` v2 must be cancelled or deleted so two Image
   notebooks cannot fight over one worker row.
+
+---
+
+## Addendum 10 — 2026-10-03: the dashboard said "not configured" while the agents were on Kaggle/Qwen3-4B
+
+### 1. The report
+
+The dashboard (/models, /, provider cards) reported Image AI and Voice AI as
+`NOT_CONFIGURED — "Set GOOGLE_CLOUD_PROJECT (Colab API project) on Render"`, labelled Script AI
+"Qwen3 1.7B", and had **no row at all** for the Showrunner. The UI was not lying about its own data —
+it was faithfully rendering a stale provider catalog.
+
+### 2. Root cause (two, both real)
+
+1. **Provider slots were pinned to a runtime that was never the production plan.**
+   `apps/api/src/lib/providerHealth.ts` hard-coded `image → runtime "colab"` and
+   `voice → runtime "colab"`. `pickWorker(workers, "image", "colab")` therefore never matched the
+   real worker row (the agent notebooks register as `runtime: "kaggle"`), so the slot fell through
+   `deriveProviderHealth` to the `!configured` branch and reported NOT_CONFIGURED **even when the
+   Kaggle worker was ONLINE**. The same pin made the Showrunner invisible: `overseer` was not a
+   provider id at all (`PROVIDER_IDS` had 6 entries, no overseer).
+2. **The model catalog described the pre-launch plan.** `MODEL_CATALOG` had `script-qwen3-1-7b`
+   ("Qwen3 1.7B"), `image-colab-image` and `voice-kokoro-82m` — none of which is what runs today
+   (four Kaggle notebooks on Qwen3-4B).
+
+A third, cosmetic, problem: the landing page carried the hard-coded sentence "Image / Voice stay
+NOT_CONFIGURED until their Colab bootstrap is wired", which is now false.
+
+### 3. The fix
+
+- `packages/shared/src/providers/health.ts`: `overseer` is now a provider id; `workerDisplayHealth`
+  puts the worker's own `model` into `health.detail` (never inferred from config).
+- `apps/api/src/lib/providerHealth.ts`: agent slots resolve their worker **by type, across whatever
+  runtime the worker registered on** (`runtimes: []`); the provider/runtime label comes from the real
+  worker row when there is one. Configuration for those slots = a Kaggle token **or** the Colab
+  config; when neither exists the reason names both runtimes. Script keeps `kaggleConfig()` (it also
+  needs `KAGGLE_KERNEL_REF` to autostart); video/youtube unchanged and still honestly NOT_CONFIGURED.
+- `packages/shared/src/providers/models.ts`: catalog is now the four real agents on `qwen3-4b` +
+  video + youtube; added `LEGACY_MODEL_KEYS` / `resolveStoredModelKey` so a switch stored under a
+  retired key (`script-qwen3-1-7b`, `image-colab-image`, `voice-kokoro-82m`) still counts for the
+  entry that replaced it — a model upgrade must not silently reset an operator's ON/OFF choice — and
+  `liveModelFromHealth()` which reads the model a worker reported.
+- `apps/api/src/routes/models.ts`: `mergeModelViews` applies the legacy key (current key wins),
+  surfaces `liveModel`, and shows the live provider/runtime instead of the planned ones.
+- Web: models page prints the live model (`no model reported` when nothing has registered);
+  `PROVIDER_ORDER`/`PROVIDER_LABELS` include the Showrunner; landing-page copy corrected.
+
+### 4. Verified (real data, 2026-10-03)
+
+- `bun test` → **304 pass / 0 fail** (21 files; new `apps/api/src/lib/providerHealth.test.ts`).
+- `npm run typecheck` → exit 0 · `bun run lint` → exit 0 (pre-existing warnings only).
+- Fed the **real** worker rows from `GET https://ostra-studio-1.onrender.com/api/workers` through the
+  new derivation: script/image/voice/overseer now report `OFFLINE — worker status OFFLINE`,
+  `runtime=kaggle`, `liveModel=Qwen/Qwen3-4B`, and `/api/models` lists four agent rows instead of
+  three. Before the change the same rows produced `NOT_CONFIGURED — Set GOOGLE_CLOUD_PROJECT`.
+  Video/YouTube still report NOT_CONFIGURED (true: not deployed).
+
+### 5. NOT done / operator must know
+
+- **Render has not been redeployed.** Until the API on Render runs this commit the deployed
+  `/api/health` and `/api/models` still return the old catalog, so the browser will still show
+  "not configured". Push + redeploy Render, then reload the dashboard.
+- This changes **what is reported**, not worker uptime. The four agents are still OFFLINE for the
+  reasons in Addendum 10 §"not proven": Script and Voice registered with `endpoint: null` (no ngrok
+  secret attached), and `OSTRA_KEEPALIVE_MINUTES=480` is still missing on every hosting account, so
+  heartbeats expire after the default 10-minute idle window.
+- `apps/api/src/lib/providerHealth.ts` now exports `pickWorker`, `providerDefinitions` and the
+  `ProviderDef` type for the unit tests. They are pure; no behaviour change from the export.
+- `packages/shared/src/providers/registry.ts` was deliberately left alone: it is the autostart
+  adapter map (nothing consumes it except its own test), and the runtime supervisor still needs the
+  Colab starters to exist as an alternative runtime.
+
+### 6. Two more real bugs found while verifying in the browser
+
+1. **`/agents` and `/runner` were returning HTTP 500 in the web app.** `packages/shared/src/agent/agents.ts`
+   imported `"./protocol.js"`. Bun and `tsc` rewrite that to `protocol.ts`; **webpack does not**, so any
+   route whose module graph touches `@ostra/shared`'s agent module failed to compile. `/models` compiled
+   (it does not import the agent module), which is why only the agent pages looked broken. Fixed by making
+   the specifier extensionless; `orchestrator/events.ts → "../domain/schemas.js"` had the same latent bug
+   and was fixed too. `packages/shared/src/module-resolution.test.ts` now fails if any non-test file in
+   `packages/shared/src` reintroduces a relative `.js` specifier.
+2. **Run Now could have started the wrong notebook.** Once the catalog names the real runtime (`kaggle`)
+   for image/voice/overseer, `POST /api/runtime/run-now` for those slots would have handed the Kaggle
+   starter the one configured kernel (`KAGGLE_KERNEL_REF` = the **Script AI** notebook) and re-pushed it
+   under another worker's identity. Catalog entries now carry `autostart` / `autostartNote`; only `script`
+   is autostartable, the API answers `409 not_autostartable` with the real reason, and the Runner button
+   is disabled with that same reason. The catalog's `runtime`/`provider` are documented as the planned
+   home; the health row shows what the worker really registered with.
+
+### 7. Checks actually run for Addendum 10
+
+- `bun test` → **311 pass / 0 fail** (22 files).
+- `npm run typecheck` → exit 0 · `bun run lint` → exit 0 (pre-existing warnings only).
+- `bun --filter @ostra/web build` → exit 0, all 13 routes compile (the Vercel deploy path).
+- Live managed preview after a restart: `/`, `/models`, `/runner`, `/agents`, `/runtimes`, `/chat`,
+  `/studio`, `/activity`, `/projects` all **HTTP 200**. `/runner` server-renders four "Qwen3 4B" agent
+  cards plus the disabled Run buttons carrying their real reasons.

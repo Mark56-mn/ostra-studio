@@ -3,7 +3,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   MODEL_CATALOG,
   findModel,
+  liveModelFromHealth,
   modelDispatchState,
+  resolveStoredModelKey,
   type ModelView,
   type ProviderHealth,
 } from "@ostra/shared";
@@ -42,8 +44,19 @@ export type ProviderHealthMap = Record<string, { health?: ProviderHealth } | und
  * without a database or a live provider check.
  */
 export function mergeModelViews(controls: ControlRow[], providers: ProviderHealthMap): ModelView[] {
+  // A switch stored under a retired key still counts for the entry that replaced it, so the model
+  // upgrade did not silently drop an operator's ON/OFF decision. A current key always wins.
   const byKey = new Map<string, ControlRow>();
-  for (const row of controls) byKey.set(row.key, row);
+  const catalogKeys = new Set(MODEL_CATALOG.map((m) => m.key));
+  for (const row of controls) {
+    const exact = row.key.trim().toLowerCase();
+    if (catalogKeys.has(exact)) {
+      byKey.set(exact, row); // a current key always beats a legacy row for the same slot
+      continue;
+    }
+    const resolved = resolveStoredModelKey(row.key);
+    if (resolved && !byKey.has(resolved)) byKey.set(resolved, row);
+  }
   return MODEL_CATALOG.map((entry) => {
     const stored = byKey.get(entry.key);
     const health = providers?.[entry.providerId]?.health ?? null;
@@ -54,11 +67,12 @@ export function mergeModelViews(controls: ControlRow[], providers: ProviderHealt
       modelRef: entry.modelRef,
       label: entry.label,
       description: entry.description,
-      provider: entry.provider,
-      runtime: entry.runtime,
+      provider: liveDetail(health, "provider") ?? entry.provider,
+      runtime: liveDetail(health, "runtime") ?? entry.runtime,
       enabled,
       dispatch: modelDispatchState(enabled, health),
       health,
+      liveModel: liveModelFromHealth(health),
       note: stored?.note ?? null,
       updatedAt: stored?.updated_at ?? null,
       updatedBy: stored?.updated_by ?? null,
@@ -78,6 +92,12 @@ async function readControls(
 }
 
 /** Catalog + stored switches + real health. Never throws — a failed health read degrades to null. */
+/** A non-empty string field a live worker reported in its health detail, or null. */
+function liveDetail(health: ProviderHealth | null, field: string): string | null {
+  const v = health?.detail?.[field];
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
+}
+
 export async function collectModelViews(supa: SupabaseClient): Promise<ModelView[]> {
   const [report, controls] = await Promise.all([
     buildHealthReport().catch(() => null),

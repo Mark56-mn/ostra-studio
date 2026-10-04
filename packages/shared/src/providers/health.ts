@@ -11,7 +11,9 @@
 import type { ProviderHealth, ProviderStatus } from "./contracts";
 import { isHeartbeatStale } from "../orchestrator/state";
 
-export const PROVIDER_IDS = ["script", "image", "voice", "video", "youtube", "storage"] as const;
+// One id per real capability slot. `overseer` (the Showrunner) is a first-class slot: it registers its
+// own worker row, so it needs its own health entry — otherwise a live Showrunner is invisible here.
+export const PROVIDER_IDS = ["script", "image", "voice", "overseer", "video", "youtube", "storage"] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 
 /** The one and only status that means "this provider is actually usable right now". */
@@ -93,6 +95,8 @@ export function workerDisplayHealth(row: WorkerHealthRow, nowMs = Date.now()): P
       workerSlug: row.worker_id ?? undefined,
       runtime: row.runtime ?? undefined,
       provider: row.provider ?? undefined,
+      // The model the worker itself reported (e.g. "Qwen/Qwen3-4B"). Never assumed from config.
+      model: row.model ?? undefined,
       workerStatus: status || undefined,
       endpointHost: hostOf(row.endpoint),
       heartbeatTimeoutSec: timeoutSec,

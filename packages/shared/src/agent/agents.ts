@@ -12,11 +12,14 @@
 //  - The overseer reads the real channel and the real store. Its report is `parse: "json"` only when
 //    the model returned the envelope, exactly like every other agent — a prose report is still shown.
 
+// Extensionless on purpose: the web app bundles this package with webpack (transpilePackages), and
+// webpack does not rewrite a "./protocol.js" specifier back to protocol.ts, which made /agents and
+// /runner fail to compile. Bun/Node ESM consumers resolve the extensionless form just as well.
 import {
   AGENT_ACTION_REFERENCE,
   renderStoreContext,
   type AgentStoreSnapshot,
-} from "./protocol.js";
+} from "./protocol";
 
 /** The four AI roles that exist in a production channel. `director` is the human and is never an agent. */
 export type AgentKind = "script" | "image" | "voice" | "overseer";

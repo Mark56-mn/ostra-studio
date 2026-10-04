@@ -34,7 +34,7 @@ function worker(overrides: Partial<WorkerHealthRow> = {}): WorkerHealthRow {
 
 describe("provider health contract", () => {
   it("exposes exactly the required status vocabulary", () => {
-    assert.deepEqual([...PROVIDER_IDS], ["script", "image", "voice", "video", "youtube", "storage"]);
+    assert.deepEqual([...PROVIDER_IDS], ["script", "image", "voice", "overseer", "video", "youtube", "storage"]);
   });
 
   it("statusOk is true only for ONLINE", () => {

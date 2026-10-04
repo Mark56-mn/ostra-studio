@@ -7,10 +7,12 @@
 -- database behaves exactly like the code default and nothing has to be seeded.
 create table if not exists model_controls (
   id uuid primary key default gen_random_uuid(),
-  -- Stable catalog key, e.g. "script-qwen3-1-7b" (see packages/shared/src/providers/models.ts)
+  -- Stable catalog key, e.g. "script-qwen3-4b" (see packages/shared/src/providers/models.ts).
+  -- Rows stored under a retired key (script-qwen3-1-7b, image-colab-image, voice-kokoro-82m) are
+  -- still honoured by LEGACY_MODEL_KEYS, so a model upgrade never silently resets a switch.
   key text unique not null check (key ~ '^[a-z0-9-]{2,120}$'),
-  provider_id text not null,          -- registry slot: script | image | voice | video | youtube
-  model_ref text not null,            -- concrete adapter, e.g. qwen3-1-7b, ffmpeg
+  provider_id text not null,          -- registry slot: script | image | voice | overseer | video | youtube
+  model_ref text not null,            -- concrete adapter, e.g. qwen3-4b, ffmpeg
   enabled boolean not null default true,
   note text,
   updated_by text,                    -- actor that flipped it (audit trail); never a secret

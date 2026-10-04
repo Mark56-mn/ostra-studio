@@ -2,12 +2,16 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import {
+  LEGACY_MODEL_KEYS,
   MODEL_CATALOG,
+  autostartRefusal,
   findModel,
   isModelKey,
+  liveModelFromHealth,
   modelDispatchState,
   modelForProvider,
   modelKey,
+  resolveStoredModelKey,
 } from "./models.js";
 import type { ProviderHealth } from "./contracts.js";
 
@@ -45,15 +49,74 @@ describe("MODEL_CATALOG", () => {
   it("covers exactly the switchable AI slots, and never storage", () => {
     assert.deepEqual(
       [...MODEL_CATALOG.map((m) => m.providerId)].sort(),
-      ["image", "script", "video", "voice", "youtube"]
+      ["image", "overseer", "script", "video", "voice", "youtube"]
     );
+  });
+
+  it("names the model the Kaggle agents actually serve", () => {
+    for (const id of ["script", "image", "voice", "overseer"] as const) {
+      const entry = modelForProvider(id);
+      assert.equal(entry?.modelRef, "qwen3-4b", `${id} modelRef`);
+      assert.equal(entry?.runtime, "kaggle", `${id} runtime`);
+      assert.equal(entry?.provider, "kaggle", `${id} provider`);
+    }
+  });
+
+  it("marks only Script AI autostartable and explains every refusal", () => {
+    const startable = MODEL_CATALOG.filter((m) => m.autostart).map((m) => m.providerId);
+    assert.deepEqual(startable, ["script"]);
+    for (const m of MODEL_CATALOG.filter((e) => !e.autostart)) {
+      assert.ok(m.autostartNote && m.autostartNote.length > 20, `${m.key} must explain why it cannot start`);
+      assert.ok(!/secret|token/i.test(m.autostartNote), `${m.key} note must not mention secrets`);
+    }
+  });
+
+  it("resolves every retired key to a key that exists in the catalog", () => {
+    for (const [oldKey, newKey] of Object.entries(LEGACY_MODEL_KEYS)) {
+      assert.equal(findModel(newKey)?.key, newKey, `${oldKey} → ${newKey} must exist`);
+    }
+  });
+});
+
+describe("resolveStoredModelKey", () => {
+  it("keeps a current key as-is", () => {
+    assert.equal(resolveStoredModelKey("script-qwen3-4b"), "script-qwen3-4b");
+    assert.equal(resolveStoredModelKey("  IMAGE-QWEN3-4B "), "image-qwen3-4b");
+  });
+
+  it("maps a retired key to the entry that replaced it", () => {
+    assert.equal(resolveStoredModelKey("script-qwen3-1-7b"), "script-qwen3-4b");
+    assert.equal(resolveStoredModelKey("voice-kokoro-82m"), "voice-qwen3-4b");
+  });
+
+  it("returns null for keys with no successor", () => {
+    assert.equal(resolveStoredModelKey("ghost-model"), null);
+    assert.equal(resolveStoredModelKey(null), null);
+  });
+});
+
+describe("liveModelFromHealth", () => {
+  it("reads the model a worker reported", () => {
+    const h: ProviderHealth = {
+      ok: true,
+      status: "ONLINE",
+      checkedAt: new Date().toISOString(),
+      detail: { model: "Qwen/Qwen3-4B" },
+    };
+    assert.equal(liveModelFromHealth(h), "Qwen/Qwen3-4B");
+  });
+
+  it("is null when no worker reported a model (never inferred from config)", () => {
+    assert.equal(liveModelFromHealth(null), null);
+    assert.equal(liveModelFromHealth(health("OFFLINE")), null);
+    assert.equal(liveModelFromHealth({ ...health("ONLINE"), detail: { model: "  " } }), null);
   });
 });
 
 describe("lookups", () => {
   it("finds a model by key, case-insensitively", () => {
-    assert.equal(findModel("script-qwen3-1-7b")?.providerId, "script");
-    assert.equal(findModel("  SCRIPT-QWEN3-1-7B ")?.providerId, "script");
+    assert.equal(findModel("script-qwen3-4b")?.providerId, "script");
+    assert.equal(findModel("  SCRIPT-QWEN3-4B ")?.providerId, "script");
   });
 
   it("returns null for unknown/empty keys", () => {
@@ -64,7 +127,7 @@ describe("lookups", () => {
   });
 
   it("maps a provider slot to its switchable model", () => {
-    assert.equal(modelForProvider("voice")?.modelRef, "kokoro-82m");
+    assert.equal(modelForProvider("voice")?.modelRef, "qwen3-4b");
     assert.equal(modelForProvider("storage"), null);
     assert.equal(modelForProvider(null), null);
   });
@@ -91,5 +154,29 @@ describe("modelDispatchState", () => {
   it("never reports DISABLED as ONLINE (the two answers stay independent)", () => {
     const off = modelDispatchState(false, health("ONLINE"));
     assert.notEqual(off, "READY");
+  });
+});
+
+describe("autostartRefusal", () => {
+  it("allows the slot the orchestrator can really start", () => {
+    assert.equal(autostartRefusal("script"), null);
+  });
+
+  it("refuses the agent notebooks a human starts in Kaggle, with the real reason", () => {
+    for (const id of ["image", "voice", "overseer"]) {
+      const refusal = autostartRefusal(id);
+      assert.ok(refusal && refusal.length > 20, `${id} must refuse with a reason`);
+      assert.match(refusal, /Kaggle/);
+    }
+  });
+
+  it("refuses the not-deployed slots too", () => {
+    assert.match(String(autostartRefusal("video")), /not deployed/);
+    assert.match(String(autostartRefusal("youtube")), /YouTube OAuth/);
+  });
+
+  it("does not refuse an unknown slot (the caller answers normally)", () => {
+    assert.equal(autostartRefusal("ghost"), null);
+    assert.equal(autostartRefusal(null), null);
   });
 });

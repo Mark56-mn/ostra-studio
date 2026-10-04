@@ -158,12 +158,13 @@ export function heartbeatAgeLabel(iso?: string | null, nowMs = Date.now()): stri
 }
 
 /** Provider ids in the order the dashboard should display them. */
-export const PROVIDER_ORDER = ["script", "image", "voice", "video", "youtube", "storage"] as const;
+export const PROVIDER_ORDER = ["script", "image", "voice", "overseer", "video", "youtube", "storage"] as const;
 
 export const PROVIDER_LABELS: Record<string, string> = {
   script: "Script AI",
   image: "Image AI",
   voice: "Voice AI",
+  overseer: "Showrunner",
   video: "Video Engine",
   youtube: "YouTube",
   storage: "Storage",

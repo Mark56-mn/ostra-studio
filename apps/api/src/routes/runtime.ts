@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import { autostartRefusal } from "@ostra/shared";
 import { requireSupabase } from "../lib/supabase.js";
 import { schedulerTick, runNow, runNowByWorker } from "../lib/scheduler.js";
 
@@ -42,6 +43,12 @@ export async function runNowHandler(req: Request, res: Response) {
     return res.status(status).json(r);
   }
   if (body?.worker_type && body?.runtime && body?.provider) {
+    // Refuse honestly instead of starting the wrong runtime: the agent notebooks other than Script
+    // AI are started by hand in Kaggle, and the only configured Kaggle kernel is the Script one.
+    const refusal = autostartRefusal(body.worker_type);
+    if (refusal) {
+      return res.status(409).json({ action: "not_autostartable", error: refusal, worker_type: body.worker_type });
+    }
     const r = await runNowByWorker(supa, body.worker_type, body.runtime, body.provider);
     const status = r.action === "requested" ? 201 : r.action.startsWith("skipped") ? 200 : r.action === "not_autostartable" ? 409 : 400;
     return res.status(status).json(r);

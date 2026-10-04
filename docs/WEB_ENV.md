@@ -44,11 +44,16 @@ GET  {NEXT_PUBLIC_API_URL}/api/runtime/history?limit=40
 
 | Entry | worker_type | runtime | provider | Button |
 | --- | --- | --- | --- | --- |
-| Script AI · Qwen3 1.7B | `script` | `kaggle` | `kaggle` | enabled — re-pushes the notebook as a new version |
-| Image AI · Colab | `image` | `colab` | `colab-image` | enabled — answers `NOT_AUTOSTARTABLE` until Colab creds exist |
-| Voice AI · Kokoro-82M | `voice` | `colab` | `kokoro-82m` | enabled — same rule as Image |
-| Video Engine · FFmpeg | `video` | `local` | `ffmpeg` | disabled — no starter exists for `local` |
-| YouTube Publisher | `youtube` | `api` | `youtube-api` | disabled — no starter exists for `api` |
+| Script AI · Qwen3 4B | `script` | `kaggle` | `kaggle` | enabled — re-pushes `KAGGLE_KERNEL_REF` as a new version |
+| Image AI · Qwen3 4B | `image` | `kaggle` | `kaggle` | disabled — its notebook is started by hand in Kaggle; Run Now answers `409 not_autostartable` |
+| Voice AI · Qwen3 4B | `voice` | `kaggle` | `kaggle` | disabled — same rule as Image |
+| Showrunner · Qwen3 4B | `overseer` | `kaggle` | `kaggle` | disabled — same rule as Image |
+| Video Engine · FFmpeg | `video` | `local` | `ffmpeg` | disabled — not deployed yet |
+| YouTube Publisher | `youtube` | `api` | `youtube-api` | disabled — YouTube OAuth is not configured |
+
+`runtime` / `provider` here are the planned home of the slot. The health shown beside each button is
+the live worker row, so an agent that registered on Kaggle is reported as Kaggle with the model it
+actually loaded.
 
 Displayed states are read, never assumed:
 

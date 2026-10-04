@@ -108,7 +108,7 @@ export default function Home() {
                 <ProviderStatus compact pollMs={20_000} />
               </div>
               <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-2.5 text-[12px] leading-5 text-[#9AA3C0]">
-                Script AI autostarts by pushing <span className="font-mono text-[11px] text-white">bettertrade/notebook7eae283a4a</span> to Kaggle, then waits for the worker to <span className="text-white">register</span> and <span className="text-white">heartbeat</span>. Image / Voice stay <span className="text-white">NOT_CONFIGURED</span> until their Colab bootstrap is wired. Configuration alone never becomes ONLINE.
+                Script AI autostarts by pushing <span className="font-mono text-[11px] text-white">bettertrade/notebook7eae283a4a</span> to Kaggle, then waits for the worker to <span className="text-white">register</span> and <span className="text-white">heartbeat</span>. Image, Voice and the Showrunner run as their own Kaggle notebooks on <span className="text-white">Qwen3 4B</span>, so they report whatever their worker actually did &mdash; no notebook session means <span className="text-white">OFFLINE</span>, never a pretend ONLINE. Configuration alone never becomes ONLINE.
               </div>
             </div>
           </div>

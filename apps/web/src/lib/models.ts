@@ -22,6 +22,8 @@ export type ModelView = {
   dispatch: ModelDispatchState;
   /** Real provider health. Null when the report could not be collected. */
   health: ProviderHealth | null;
+  /** The model the live worker reported (e.g. "Qwen/Qwen3-4B"). Null ⇒ never observed. */
+  liveModel?: string | null;
   note?: string | null;
   updatedAt?: string | null;
   updatedBy?: string | null;

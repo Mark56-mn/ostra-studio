@@ -76,7 +76,7 @@ function ModelCard({
         <div className="min-w-0">
           <div className="truncate text-[14px] font-semibold tracking-tight text-white">{model.label}</div>
           <div className="mt-0.5 font-mono text-[11px] text-[#6B7594]">
-            {model.provider} · {model.runtime} · {model.key}
+            {model.provider} · {model.runtime} · {model.liveModel ?? "no model reported"}
           </div>
         </div>
         <Switch on={model.enabled} busy={busy} label={`Toggle ${model.label}`} onToggle={() => onToggle(!model.enabled)} />
@@ -99,6 +99,11 @@ function ModelCard({
       </div>
 
       {health?.reason && <div className="mt-2 text-[11px] leading-4 text-[#9AA3C0]">{health.reason}</div>}
+      {model.liveModel && model.liveModel !== model.label.split("·").pop()?.trim() && (
+        <div className="mt-1 text-[11px] leading-4 text-[#9AA3C0]">
+          Live model reported by the worker: <span className="font-mono text-white">{model.liveModel}</span>
+        </div>
+      )}
 
       <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[10px] text-[#6B7594]">
         {health?.lastHeartbeatAt !== undefined && <span>heartbeat {heartbeatAgeLabel(health?.lastHeartbeatAt)}</span>}

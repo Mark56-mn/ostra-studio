@@ -101,11 +101,15 @@ function ModelRunnerCard({
   const healthTone = statusTone(view?.health?.status);
   const runTone = runRowTone(latest);
 
-  const disabledReason = !startable
-    ? `No start path for runtime "${entry.runtime}" — Run Now answers not_autostartable.`
-    : switchedOff
-      ? "Switched off in Models — switch it on there first."
-      : undefined;
+  // Only Script AI can be started from here. The other agents live in their own Kaggle notebooks;
+  // pressing this button for them would push the Script kernel instead, so it stays disabled.
+  const disabledReason = !entry.autostart
+    ? entry.autostartNote ?? `${entry.label} has no autostart path configured.`
+    : !startable
+      ? `No start path for runtime "${entry.runtime}" — Run Now answers not_autostartable.`
+      : switchedOff
+        ? "Switched off in Models — switch it on there first."
+        : undefined;
 
   return (
     <div
@@ -130,7 +134,7 @@ function ModelRunnerCard({
         <RunButton
           label={`Run ${PROVIDER_LABELS[entry.providerId] ?? entry.providerId}`}
           busy={busy}
-          disabled={!startable || switchedOff}
+          disabled={!startable || !entry.autostart || switchedOff}
           disabledReason={disabledReason}
           onClick={onRun}
         />

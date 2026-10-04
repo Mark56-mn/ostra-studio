@@ -64,14 +64,21 @@ Backed by the `model_controls` table (migration `004_model_controls.sql`). No ne
 
 ```
 GET   /api/models            → { models: [{ key, providerId, modelRef, label, provider, runtime,
-                                            enabled, dispatch, health, note, updatedAt, updatedBy }],
+                                            enabled, dispatch, health, liveModel, note, updatedAt, updatedBy }],
                                  counts: { total, enabled, disabled, ready }, source: "supabase", timestamp }
 PATCH /api/models/:key       → body { enabled: boolean, note?: string }  → { model, changed, actor }
 ```
 
-- Catalog keys live in `packages/shared/src/providers/models.ts`: `script-qwen3-1-7b`, `image-colab-image`,
-  `voice-kokoro-82m`, `video-ffmpeg`, `youtube-youtube-api`. Unknown key → `404` + `known`; non-boolean
-  `enabled` → `400`; Supabase unreadable → `503` + `reason` (never a list that assumes "all on").
+- Catalog keys live in `packages/shared/src/providers/models.ts`: `script-qwen3-4b`, `image-qwen3-4b`,
+  `voice-qwen3-4b`, `overseer-qwen3-4b`, `video-ffmpeg`, `youtube-youtube-api`. Unknown key → `404` + `known`;
+  non-boolean `enabled` → `400`; Supabase unreadable → `503` + `reason` (never a list that assumes "all on").
+- Switches stored under the retired keys (`script-qwen3-1-7b`, `image-colab-image`, `voice-kokoro-82m`)
+  still count for the entry that replaced them (`LEGACY_MODEL_KEYS`); a current key always wins.
+- `provider` / `runtime` / `liveModel` come from the live worker row when one exists, so a slot reports
+  the runtime and model its worker actually registered with — never the planned one.
+- Only `script` has `autostart: true`. `POST /api/runtime/run-now` refuses the other slots with
+  `409 not_autostartable` and the real reason, so a click can never re-push the Script AI kernel as
+  another agent.
 - `dispatch` is derived, not stored: `READY` = switch ON **and** `health.status === "ONLINE"`.
   The switch never changes `health` — switching a model off cannot make it look ONLINE, and switching it
   on cannot make it look usable.
