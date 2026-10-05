@@ -606,6 +606,7 @@ export async function main(argv = process.argv): Promise<number> {
 
   console.log(`\n--- pushing ${args.agents.length} kernel(s) ---`);
   let exit = 0;
+  const pushed: Array<{ agent: AgentNotebookKind; owner: string; slug: string }> = [];
   for (let i = 0; i < args.agents.length; i++) {
     const agent = args.agents[i];
     const tokenIdx = pinnedIndex ?? i % tokens.length;
@@ -633,6 +634,18 @@ export async function main(argv = process.argv): Promise<number> {
     console.log(`  ${agent}: pushing to ${targetOwner} (token #${tokenIdx + 1}${probe.owner ? "" : ", owner unverified — Kaggle will reject a wrong account"})`);
     const code = await pushKernel(authHeader, targetOwner, agent, JSON.stringify(buildAgentNotebook(agent, bootstrap)), args.slug);
     if (code !== 0) exit = code;
+    else pushed.push({ agent, owner: targetOwner, slug: args.slug || agentKernelSlug(agent) });
+  }
+
+  // The autostart path (Run Now / scheduler / the Management Team) reads ONE ref per slot. Print the
+  // exact Render variables for the notebooks that were just pushed, so nothing has to be guessed.
+  if (pushed.length > 0) {
+    console.log("\n--- Render env so the supervisor can start them (Run Now / scheduler) ---");
+    for (const p of pushed) {
+      console.log(`  KAGGLE_KERNEL_REF_${p.agent.toUpperCase()}=${p.owner}/${p.slug}`);
+    }
+    console.log("  # each slot also needs a token whose account owns that kernel: KAGGLE_API_TOKEN_IMAGE / _VOICE / _OVERSEER");
+    console.log("  # the Script AI notebook keeps its original name: KAGGLE_KERNEL_REF");
   }
   return exit;
 }

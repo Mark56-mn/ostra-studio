@@ -101,8 +101,9 @@ function ModelRunnerCard({
   const healthTone = statusTone(view?.health?.status);
   const runTone = runRowTone(latest);
 
-  // Only Script AI can be started from here. The other agents live in their own Kaggle notebooks;
-  // pressing this button for them would push the Script kernel instead, so it stays disabled.
+  // A slot with no start path (video / youtube / the hosted management team) is disabled here. The
+  // Kaggle agents all have a start path: each pushes its OWN notebook, and a missing per-slot ref is
+  // refused by the API with the exact variable name instead of another agent's kernel.
   const disabledReason = !entry.autostart
     ? entry.autostartNote ?? `${entry.label} has no autostart path configured.`
     : !startable
@@ -253,12 +254,14 @@ export default function RunnerPage() {
             <div className="label-mono text-[#6B7594]">MANUAL CONTROL — ONE BUTTON PER AI</div>
             <h1 className="text-[22px] font-bold tracking-tight text-white">Runner</h1>
             <p className="max-w-[70ch] text-[13px] leading-6 text-[#9AA3C0]">
-              Each button asks the orchestrator to start that AI&apos;s real runtime. For{" "}
-              <span className="text-white">Script AI on Kaggle</span> this re-pushes the notebook configured as{" "}
-              <span className="font-mono text-white">KAGGLE_KERNEL_REF</span> as a new version, so Kaggle runs the
-              entire notebook — all cells — and the worker only becomes{" "}
-              <span className="text-white">ONLINE</span> once it tunnels in, registers and heartbeats. A requested
-              start is never shown as online, and a refusal is shown as the refusal it was.
+              Each button asks the orchestrator to start that AI&apos;s own runtime. Every Kaggle agent
+              re-pushes its OWN notebook as a new version: Script AI reads{" "}
+              <span className="font-mono text-white">KAGGLE_KERNEL_REF</span>, while Image, Voice and the
+              Showrunner each read <span className="font-mono text-white">KAGGLE_KERNEL_REF_&lt;SLOT&gt;</span> — so
+              Kaggle runs that entire notebook, all cells, and the worker only becomes{" "}
+              <span className="text-white">ONLINE</span> once it tunnels in, registers and heartbeats. A missing ref
+              is refused by name; a requested start is never shown as online, and a refusal is shown as the refusal
+              it was.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">

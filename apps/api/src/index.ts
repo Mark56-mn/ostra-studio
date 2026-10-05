@@ -19,10 +19,12 @@ import { schedulerTickHandler, runNowHandler, listStartupHistory } from "./route
 import { listRooms, createRoom, patchRoom, listMessages, postMessage, getStore } from "./routes/chat.js";
 import {
   getRoster,
+  getManagementPolicy,
   listStudioRooms,
   createStudioRoom,
   patchStudioRoom,
   listChannelMessages,
+  manageRoom,
   dispatchRound,
 } from "./routes/agents.js";
 
@@ -115,10 +117,12 @@ app.get("/api/chat/store", getStore);
 
 // AI Studio — agents talking to each other, with the Showrunner reporting to the director
 app.get("/api/agents/roster", getRoster);
+app.get("/api/agents/management", getManagementPolicy);
 app.get("/api/agents/rooms", listStudioRooms);
 app.post("/api/agents/rooms", createStudioRoom);
 app.patch("/api/agents/rooms/:id", patchStudioRoom);
 app.get("/api/agents/rooms/:id/messages", listChannelMessages);
+app.post("/api/agents/rooms/:id/manage", manageRoom);
 app.post("/api/agents/rooms/:id/dispatch", dispatchRound);
 
 // 404

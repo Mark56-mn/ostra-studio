@@ -199,9 +199,12 @@ export function buildBenchmarkNotebook(models: readonly string[]) {
   };
 }
 
-/** Which roles this GPU class could realistically host, from the roster's own model defaults. */
+/**
+ * Which models a Kaggle GPU class could realistically host, from the roster's own model defaults.
+ * Hosted roles (the Management Team) are skipped on purpose: they run on an API, never on a T4.
+ */
 export function rosterModels(): string[] {
-  return [...new Set(AGENT_ROSTER.map((a) => a.model))];
+  return [...new Set(AGENT_ROSTER.filter((a) => a.runtime === "kaggle").map((a) => a.model))];
 }
 
 type Args = { apply: boolean; dump: boolean; owner: string | null; slug: string | null; tokenSel: string | null; models: string[] };

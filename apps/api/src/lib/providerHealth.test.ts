@@ -11,7 +11,7 @@ import { pickWorker, providerDefinitions } from "./providerHealth.js";
 // Every env name these slots read. The list is matched as a pattern because the workspace .env
 // already holds owner-labelled Kaggle tokens (EMMANUEL_OFOYE_KAGGLE_API_TOKEN) that would otherwise
 // leak into these tests and make "nothing configured" unreachable.
-const ENV_PATTERNS = [/KAGGLE_/, /GOOGLE_/, /COLAB_/, /^GCP_/, /^OPENAI_/];
+const ENV_PATTERNS = [/KAGGLE_/, /GOOGLE_/, /COLAB_/, /^GCP_/, /^OPENAI_/, /^MANAGER_/, /^LIGHTNING_/];
 
 function managedEnvKeys(): string[] {
   return Object.keys(process.env).filter((k) => ENV_PATTERNS.some((re) => re.test(k)));
@@ -114,5 +114,29 @@ describe("providerDefinitions", () => {
       assert.match(String(image.configReason), /KAGGLE_API_TOKEN/);
       assert.match(String(image.configReason), /GOOGLE_CLOUD_PROJECT/);
     });
+  });
+
+  it("adds the hosted management slot, which is never a worker row", () => {
+    withEnv({}, () => {
+      const manager = providerDefinitions().find((d) => d.id === "manager")!;
+      assert.ok(manager, "the management slot must exist");
+      assert.equal(manager.type, "manager");
+      assert.deepEqual(manager.runtimes, ["hosted"]);
+      assert.equal(manager.configured, false, "no key ⇒ NOT_CONFIGURED, never ONLINE");
+      assert.match(String(manager.configReason), /MANAGER_API_KEY/);
+    });
+  });
+
+  it("configures the management slot from a hosted key and names the endpoint host", () => {
+    withEnv(
+      { MANAGER_API_KEY: "k", MANAGER_BASE_URL: "https://lightning.ai/api/v1/", MANAGER_CHAT_MODEL: "openai/gpt-5.6-luna" },
+      () => {
+        const manager = providerDefinitions().find((d) => d.id === "manager")!;
+        assert.equal(manager.configured, true);
+        assert.equal(manager.provider, "lightning");
+        assert.equal(manager.extraDetail?.["host"], "lightning.ai");
+        assert.equal(manager.extraDetail?.["model"], "openai/gpt-5.6-luna");
+      }
+    );
   });
 });

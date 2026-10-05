@@ -131,6 +131,127 @@ export function kaggleConfig(): KaggleConfig {
   return { apiToken, kernelRef, configured: true };
 }
 
+// ── Per-agent Kaggle notebooks (Image / Voice / Showrunner) ──────────────────
+// Each agent has its OWN notebook, and each notebook belongs to ONE Kaggle account. Starting an agent
+// therefore needs that agent's kernel ref and the token of the account that owns it — never the Script
+// kernel. Script keeps the original KAGGLE_KERNEL_REF name for Render parity; every other slot reads
+// its own KAGGLE_KERNEL_REF_<SLOT>, so a start can never silently re-push somebody else's notebook.
+export const KAGGLE_AGENT_SLOTS = ["script", "image", "voice", "overseer"] as const;
+export type KaggleAgentSlot = (typeof KAGGLE_AGENT_SLOTS)[number];
+
+/** The env var holding a slot's own Kaggle kernel ref. `script` → `KAGGLE_KERNEL_REF`. */
+export function kaggleKernelRefEnvName(workerType: string): string {
+  const slot = workerType.trim().toLowerCase();
+  if (slot === "script") return "KAGGLE_KERNEL_REF";
+  return `KAGGLE_KERNEL_REF_${slot.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+}
+
+/**
+ * The Kaggle kernel ref for one agent slot, or undefined when it is not configured.
+ *
+ * There is deliberately NO fallback to the Script ref (or any other slot's ref): pushing the Script
+ * notebook as Image/Voice/Showrunner would run the wrong worker under the wrong identity, so a missing
+ * ref is an honest refusal, not a guess.
+ */
+export function kaggleKernelRef(workerType: string): string | undefined {
+  return clean(process.env[kaggleKernelRefEnvName(workerType)]);
+}
+
+/**
+ * Candidate Kaggle tokens for a slot, best first: a slot-labelled token, then every configured token
+ * (plain name, numbered, named). Kaggle tokens each own ONE account, and the agent notebooks live on
+ * different accounts, so the starter picks the token whose account actually owns the kernel ref.
+ */
+export function kaggleApiTokensFor(workerType: string): string[] {
+  const slot = workerType.trim().toLowerCase();
+  const out: string[] = [];
+  const push = (v: string | undefined) => {
+    const t = clean(v);
+    if (t && !out.includes(t)) out.push(t);
+  };
+  const upper = slot.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+  push(process.env[`KAGGLE_API_TOKEN_${upper}`]);
+  push(process.env[`${upper}_KAGGLE_API_TOKEN`]);
+  for (const t of kaggleApiTokens()) push(t);
+  return out;
+}
+
+// ── Management Team (hosted, OpenAI-compatible) ──────────────────────────────
+// The management team is a HOSTED model, not a worker row: there is no notebook to heartbeat. It is
+// therefore health-checked with a real (tiny) completion call, never with mere configuration presence.
+//
+// Any OpenAI-compatible endpoint works (OpenAI, Lightning AI, a self-hosted gateway, …) because only
+// `base_url` + bearer key + `POST {base}/chat/completions` is used. The generic OPENAI_* vars are
+// accepted as a fallback so an operator who already has one hosted key needs no second key.
+export type ManagerConfig = {
+  apiKey?: string;
+  baseUrl?: string;
+  model?: string;
+  /** Provider label derived from the host (e.g. `lightning`, `openai`), for display only. */
+  provider: string;
+  /** Host of the base URL — safe to show in the UI; the URL itself stays server-side. */
+  host: string | null;
+  configured: boolean;
+  reason?: string;
+};
+
+/** How much the management team may do on its own. Never inferred — always an explicit env var. */
+export type ManagerAutonomy = "off" | "instruct" | "full";
+
+export const DEFAULT_MANAGED_MODEL = "gpt-4o-mini";
+
+export function managerConfig(): ManagerConfig {
+  const apiKey =
+    clean(process.env.MANAGER_API_KEY) ??
+    clean(process.env.LIGHTNING_API_KEY) ??
+    clean(process.env.OPENAI_API_KEY);
+  const baseUrl =
+    clean(process.env.MANAGER_BASE_URL) ??
+    clean(process.env.LIGHTNING_BASE_URL) ??
+    clean(process.env.OPENAI_BASE_URL) ??
+    "https://api.openai.com/v1";
+  const model =
+    clean(process.env.MANAGER_CHAT_MODEL) ??
+    clean(process.env.LIGHTNING_CHAT_MODEL) ??
+    clean(process.env.OPENAI_CHAT_MODEL) ??
+    DEFAULT_MANAGED_MODEL;
+  const host = hostOfUrl(baseUrl);
+  const provider = /lightning/i.test(host ?? "") ? "lightning" : "openai-compatible";
+  if (!apiKey) {
+    return {
+      baseUrl,
+      model,
+      provider,
+      host,
+      configured: false,
+      reason: "Set MANAGER_API_KEY on Render (any OpenAI-compatible key, e.g. a Lightning AI key)",
+    };
+  }
+  return { apiKey, baseUrl, model, provider, host, configured: true };
+}
+
+function hostOfUrl(url: string): string | null {
+  try {
+    return new URL(url).host;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Autonomy gate for the management team:
+ *  - `off`     → the model may talk, but may not start runtimes (default when the operator did not ask).
+ *  - `instruct`→ it may address any agent, including the Showrunner, and write the store.
+ *  - `full`    → it may additionally ask the supervisor to start an autostartable runtime.
+ * Anything unrecognised degrades to `off` — an unknown value never grants more power.
+ */
+export function managerAutonomy(): ManagerAutonomy {
+  const raw = clean(process.env.MANAGER_AUTONOMY)?.toLowerCase();
+  if (raw === "full") return "full";
+  if (raw === "instruct") return "instruct";
+  return "off";
+}
+
 // ── Colab (Image / Voice runtimes) ───────────────────────────────────────────
 // Managed Colab runtimes need project + OAuth scope, and a bootstrap that actually starts the
 // worker inside the runtime. Without the bootstrap the runtime would be a dangling VM, so we

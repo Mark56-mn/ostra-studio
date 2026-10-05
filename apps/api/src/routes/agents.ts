@@ -2,7 +2,9 @@
 // AI Studio — the production channel where the agents talk to EACH OTHER and the Showrunner reports
 // to the director.
 //
-//   GET    /api/agents/roster                  → the four roles + their REAL live status
+//   GET    /api/agents/roster                  → every role (management team + four agents) + REAL status
+//   GET    /api/agents/management              → what the management team may do right now (autonomy)
+//   POST   /api/agents/rooms/:id/manage         → one Management Team turn: brief + instructions + starts
 //   GET    /api/agents/rooms                   → studio channels (kind='studio')
 //   POST   /api/agents/rooms                   → create a studio channel, optionally bound to a project
 //   PATCH  /api/agents/rooms/:id               → retitle / rebind a channel
@@ -18,13 +20,14 @@
 
 import type { Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { AGENT_ROSTER, AGENT_CHANNEL_ORDER, type AgentKind } from "@ostra/shared";
+import { AGENT_ROSTER, AGENT_ALL_KINDS, managerAutonomy, type AgentKind } from "@ostra/shared";
 import { requireSupabase } from "../lib/supabase.js";
 import { resolveChannelBackend } from "../lib/agentRuntime.js";
-import { insertChannelMessage, loadChannel, runProductionRound } from "../lib/agentChannel.js";
+import { insertChannelMessage, loadChannel, runAgentTurn, runProductionRound } from "../lib/agentChannel.js";
+import { startableTargets } from "../lib/managerAutonomy.js";
 
 const MAX_BRIEF_CHARS = 8000;
-const ROSTER_KINDS: AgentKind[] = [...AGENT_CHANNEL_ORDER, "overseer"];
+const ROSTER_KINDS: AgentKind[] = [...AGENT_ALL_KINDS];
 
 type RoomRow = { id: string; project_id: string | null; title: string; kind: string; created_at: string; updated_at: string };
 
@@ -145,6 +148,75 @@ export async function listChannelMessages(req: Request, res: Response) {
   res.json({ room, messages, roster, timestamp: new Date().toISOString() });
 }
 
+// ── GET /api/agents/management ───────────────────────────────────────────────
+/**
+ * What the Management Team is allowed to do, and what it is actually able to do — both read from the
+ * real environment and the real autostart path, never from a hard-coded claim.
+ */
+export async function getManagementPolicy(_req: Request, res: Response) {
+  const supa = requireSupabase(res);
+  if (!supa) return;
+  const { status } = await resolveChannelBackend(supa, "manager");
+  res.json({
+    autonomy: managerAutonomy(),
+    available: status.available,
+    provider: status.provider,
+    model: status.model,
+    endpointHost: status.endpointHost,
+    detail: status.detail,
+    startable: startableTargets(),
+    timestamp: new Date().toISOString(),
+  });
+}
+
+// ── POST /api/agents/rooms/:id/manage ────────────────────────────────────────
+/**
+ * ONE Management Team turn: the director's note is persisted first, then the model is called with the
+ * real channel and store. Whatever it emits is what is stored — instructions to peers, store writes,
+ * and runtime starts that the autonomy gate actually allows.
+ */
+export async function manageRoom(req: Request, res: Response) {
+  const supa = requireSupabase(res);
+  if (!supa) return;
+  const { id } = req.params as { id: string };
+  const room = await loadStudioRoom(supa, id);
+  if (!room) return res.status(404).json({ error: "studio room not found" });
+
+  const body = req.body as { brief?: string; note?: string } | null;
+  const brief = (body?.brief ?? "").toString().trim();
+  if (brief.length > MAX_BRIEF_CHARS) {
+    return res.status(400).json({ error: `brief is too long (max ${MAX_BRIEF_CHARS} characters)` });
+  }
+
+  if (brief) {
+    const row = await insertChannelMessage(supa, {
+      room_id: id,
+      project_id: room.project_id,
+      from_agent: "director",
+      to_agent: "manager",
+      kind: "brief",
+      content: brief,
+      status: "sent",
+    });
+    if (!row) return res.status(500).json({ error: "the brief could not be saved" });
+  }
+
+  const turn = await runAgentTurn(supa, {
+    roomId: id,
+    projectId: room.project_id,
+    agent: "manager",
+    directorNote: body?.note ?? null,
+  });
+
+  await supa.from("chat_rooms").update({ updated_at: new Date().toISOString() }).eq("id", id);
+
+  if (!turn.ok) {
+    return res.status(503).json({ error: "NO_MANAGEMENT_BACKEND", reason: turn.error, turn });
+  }
+  const [messages, roster] = await Promise.all([loadChannel(supa, id), rosterWithStatus(supa)]);
+  res.json({ turn, autonomy: managerAutonomy(), messages, roster });
+}
+
 // ── POST /api/agents/rooms/:id/dispatch ──────────────────────────────────────
 export async function dispatchRound(req: Request, res: Response) {
   const supa = requireSupabase(res);
@@ -153,7 +225,7 @@ export async function dispatchRound(req: Request, res: Response) {
   const room = await loadStudioRoom(supa, id);
   if (!room) return res.status(404).json({ error: "studio room not found" });
 
-  const body = req.body as { brief?: string; note?: string; overseer?: boolean } | null;
+  const body = req.body as { brief?: string; note?: string; overseer?: boolean; manager?: boolean } | null;
   const brief = (body?.brief ?? "").toString().trim();
   if (brief.length > MAX_BRIEF_CHARS) {
     return res.status(400).json({ error: `brief is too long (max ${MAX_BRIEF_CHARS} characters)` });
@@ -179,6 +251,7 @@ export async function dispatchRound(req: Request, res: Response) {
     projectId: room.project_id,
     directorNote: body?.note ?? null,
     overseer: body?.overseer !== false,
+    manager: body?.manager !== false,
   });
 
   await supa.from("chat_rooms").update({ updated_at: new Date().toISOString() }).eq("id", id);

@@ -43,8 +43,9 @@ export async function runNowHandler(req: Request, res: Response) {
     return res.status(status).json(r);
   }
   if (body?.worker_type && body?.runtime && body?.provider) {
-    // Refuse honestly instead of starting the wrong runtime: the agent notebooks other than Script
-    // AI are started by hand in Kaggle, and the only configured Kaggle kernel is the Script one.
+    // Refuse honestly instead of starting the wrong runtime: a slot with no start path is refused by
+    // name here, and a Kaggle agent whose own kernel ref is unset is refused by the supervisor with the
+    // exact missing variable (never another agent's notebook).
     const refusal = autostartRefusal(body.worker_type);
     if (refusal) {
       return res.status(409).json({ action: "not_autostartable", error: refusal, worker_type: body.worker_type });

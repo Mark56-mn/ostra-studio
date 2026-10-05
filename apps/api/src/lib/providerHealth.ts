@@ -6,12 +6,14 @@ import {
   getServerSupabase,
   kaggleApiTokens,
   kaggleConfig,
+  managerConfig,
   summarizeHealth,
   type ProviderHealth,
   type ProviderId,
   type StartupAttemptRow,
   type WorkerHealthRow,
 } from "@ostra/shared";
+import { managerBackend, probeHostedModel } from "./agentRuntime.js";
 
 /** One provider entry in the health report: stable id + display provider + truthful health. */
 export type ProviderHealthEntry = {
@@ -168,6 +170,16 @@ export function providerDefinitions(): ProviderDef[] {
 
   return [
     {
+      id: "manager",
+      type: "manager",
+      // The management team is hosted, so there is never a worker row for it.
+      runtimes: ["hosted"],
+      provider: managerConfig().provider,
+      configured: managerConfig().configured,
+      configReason: managerConfig().reason,
+      extraDetail: { model: managerConfig().model, host: managerConfig().host },
+    },
+    {
       id: "script",
       type: "script",
       runtimes: [],
@@ -246,6 +258,14 @@ async function collectAll(supa: SupabaseClient | null): Promise<{
       runtime,
       health: def.extraDetail ? { ...health, detail: { ...(health.detail ?? {}), ...def.extraDetail } } : health,
     };
+  }
+
+  // The management team is HOSTED, so a heartbeat cannot prove it is alive: a tiny real completion
+  // call is the only honest evidence. Its probe result is cached briefly inside `probeHostedModel`.
+  const manager = managerConfig();
+  if (manager.configured) {
+    const health = await probeHostedModel(managerBackend(), { timeoutMs: 8000 });
+    providers.manager = { id: "manager", provider: manager.provider, runtime: "hosted", health };
   }
 
   // Storage health is the real Supabase check (DB + Storage share the same project/credentials).

@@ -783,3 +783,122 @@ NOT_CONFIGURED until their Colab bootstrap is wired", which is now false.
 - Live managed preview after a restart: `/`, `/models`, `/runner`, `/agents`, `/runtimes`, `/chat`,
   `/studio`, `/activity`, `/projects` all **HTTP 200**. `/runner` server-renders four "Qwen3 4B" agent
   cards plus the disabled Run buttons carrying their real reasons.
+
+---
+
+## Addendum 11 — Management Team (hosted, director-facing, with a server-enforced autonomy gate)
+
+### 1. What was added
+
+A **fifth role, `manager`**, called "Management Team" everywhere in the UI. It is a *hosted*
+OpenAI-compatible model (the operator's example — Lightning AI `https://lightning.ai/api/v1/` with
+`openai/gpt-5.6-luna` — works verbatim, and so does OpenAI or any gateway, because only
+`base_url` + bearer key + `POST {base}/chat/completions` is used; **no SDK was added**).
+
+- `packages/shared/src/lib/env.ts` — `managerConfig()` (`MANAGER_API_KEY`/`MANAGER_BASE_URL`/
+  `MANAGER_CHAT_MODEL`, falling back to `LIGHTNING_*` then `OPENAI_*`) and `managerAutonomy()`.
+- `packages/shared/src/providers/health.ts` — `manager` is now a `ProviderId`.
+- `packages/shared/src/providers/models.ts` — catalog entry `manager-hosted` (autostart: false, with the
+  reason: there is no runtime to start).
+- `packages/shared/src/agent/agents.ts` — manager profile, `AGENT_ALL_KINDS`, manager prompt rules.
+- `packages/shared/src/agent/protocol.ts` — `manager` participant, `instruction` message kind, `start`
+  list in the envelope (`AgentReply.starts`), and `resolveParticipant()`.
+- `apps/api/src/lib/agentRuntime.ts` — `managerBackend()`, `resolveManagerBackend()`, `probeHostedModel()`
+  (a real tiny completion, cached 60 s), `hosted_manager` transport, array-shaped `content` support.
+- `apps/api/src/lib/managerAutonomy.ts` — **the only** place a requested start is decided.
+- `apps/api/src/lib/agentChannel.ts` — manager turn first in a round; its `start` list is applied.
+- `apps/api/src/routes/agents.ts` — `GET /api/agents/management`, `POST /api/agents/rooms/:id/manage`.
+- `apps/web/src/app/management/page.tsx` + nav entry, `apps/web/src/lib/agents.ts` clients.
+
+### 2. The autonomy rules (server-side, never the model's choice)
+
+`MANAGER_AUTONOMY` ∈ `off` (default) | `instruct` | `full`; anything unrecognised → `off`.
+
+- Instructions to Script/Image/Voice **and the Showrunner** always work (they are ordinary channel rows).
+- A `start` request is checked per target: autonomy gate → known worker type → `autostartRefusal()` →
+  the same `runNowByWorker()` the Run Now button uses. Refusals are returned as data
+  (`refused_autonomy`, `refused_unknown_target`, `not_autostartable`) and shown on `/management`.
+- Only `script` was autostartable at the time, so this path could never re-push the Script kernel as another agent. **Superseded by Addendum 12**: all four Kaggle agents now have their own autostart path (each pushes its own notebook), and the same per-slot rule still prevents any cross-slot kernel.
+
+### 3. Honesty notes (what this does NOT do)
+
+- The management team has **no worker row** and never heartbeats: `ONLINE` requires a real completion call.
+- It does not run the agents' work: it plans (store `actions`) and instructs. Episodes/seasons are real
+  only when the agents actually produce them — throughput is still bounded by GPU sessions, and nothing
+  in this code claims otherwise.
+- `rosterModels()` skips hosted roles so the Kaggle benchmark never tries to run the management model on a T4.
+
+### 4. Operator steps
+
+1. Add on Render: `MANAGER_API_KEY`, `MANAGER_BASE_URL`, `MANAGER_CHAT_MODEL`, `MANAGER_AUTONOMY`.
+   Without `MANAGER_API_KEY` the slot is honestly `NOT_CONFIGURED` and the page says so.
+2. Deploy (Render API **and** Vercel — the page is a new route).
+3. Open `/management` and send a brief.
+
+### 5. Checks actually run
+
+- `bun test` → **343 pass / 0 fail** (26 files), including new
+  `agentRuntime.manager.test.ts`, `managerAutonomy.test.ts`, `env.manager.test.ts`,
+  `protocol.manager.test.ts`.
+- `npm run typecheck` → exit 0 · `bun run lint` → exit 0 (pre-existing warnings only).
+- `bun --filter @ostra/web build` → exit 0, `/management` in the route table.
+
+## Addendum 12 — 2026-10-05: Run Now can start every agent (per-slot Kaggle kernels)
+
+### 1. The bug the director reported
+
+"I can't start/run the other agents except from Script AI." That was real, and deliberate: only
+`script` had `autostart: true`, and `POST /api/runtime/run-now` answered
+`409 {"action":"not_autostartable"}` for `image` / `voice` / `overseer`. The reason was honest —
+the only configured Kaggle kernel was the **Script** notebook (`KAGGLE_KERNEL_REF`), so starting
+another slot would have re-pushed the Script kernel under that agent's identity. The fix is per-slot
+kernels, **not** an enabled button onto the wrong notebook.
+
+### 2. What changed
+
+- `packages/shared/src/lib/env.ts` — `kaggleKernelRefEnvName(slot)` (script keeps `KAGGLE_KERNEL_REF`,
+  others are `KAGGLE_KERNEL_REF_<SLOT>`), `kaggleKernelRef(slot)` (**no cross-slot fallback**), and
+  `kaggleApiTokensFor(slot)` (slot-labelled token first, then every configured token).
+- `packages/shared/src/providers/runtimeStarters.ts` — `KaggleRuntimeStarter` resolves the ref per slot
+  and picks the token whose embedded account owns that ref (`pickKaggleToken`); the missing-ref error
+  names the slot's exact variable.
+- `packages/shared/src/providers/models.ts` — `image`, `voice` and `overseer` are now `autostart: true`
+  (each pushes its own notebook). Refusal notes removed for them; `manager` / `video` / `youtube` keep
+  theirs. `autostartRefusal()` is unchanged in meaning: it refuses only a slot with **no** start path.
+- `apps/api/src/lib/scheduler.ts` — `runNowByWorker` gains a per-agent kernel guard **before** the lease
+  (409 `not_autostartable` naming `KAGGLE_KERNEL_REF_<SLOT>`, recorded in `runtime_startup_history`) and
+  passes the slot's ref into the starter; `startViaStarter` applies the same rule to scheduled starts.
+- `apps/api/src/lib/managerAutonomy.ts` — `SLOT_RUNTIMES` now covers `script` / `image` / `voice` /
+  `overseer`, and `startableTargets()` reports `ok:false` until that slot's own ref is set.
+- Runner `/runner` + landing copy + `docs/API_ENV.md`, `docs/WEB_ENV.md`, `AGENT_CONTRACTS.md` updated to
+  match; `scripts/kaggle-agent-notebook.ts` now prints the exact Render variables after a push.
+
+### 3. Operator steps (the parts only a human can do)
+
+1. Create/refresh the notebooks: `bun scripts/kaggle-agent-notebook.ts --agent=all --apply` (or per
+   agent with `--owner=`/`--token=`), then attach `NGROK_AUTHTOKEN_<AGENT>` +
+   `OSTRA_KEEPALIVE_MINUTES=480` to each notebook.
+2. On **Render**, set the refs the script printed, e.g.
+   `KAGGLE_KERNEL_REF_IMAGE=<owner>/ostra-image-agent`,
+   `KAGGLE_KERNEL_REF_VOICE=<owner>/ostra-voice-agent`,
+   `KAGGLE_KERNEL_REF_OVERSEER=<owner>/ostra-showrunner-agent` (Script AI keeps `KAGGLE_KERNEL_REF`).
+   Add a slot-labelled token (`KAGGLE_API_TOKEN_IMAGE` / `_VOICE` / `_OVERSEER`) when the notebook lives
+   on an account other than the default token's.
+3. Reload `/runner`: each button is enabled; a slot with no ref reports 409 with the exact variable name.
+
+### 4. Honesty notes
+
+- WIRED is not ONLINE. Enabling the button only means the orchestrator *can* push that notebook; an agent
+  still reaches `ONLINE` solely by tunnelling in, registering and heartbeating.
+- Kaggle allows **one notebook session per account**, so Speech/AI identities must not share an account's
+  session at the same time.
+- Nothing was exercised against the live Kaggle API in this change; the starter behaviour is covered by
+  mocked-fetch tests (see below) plus the pre-existing live checks.
+
+### 5. Checks actually run
+
+- `bun test` → **352 pass / 0 fail** (26 files), including two new `runtimeStarters` cases: a non-script
+  slot with no own ref is refused by name and never names the Script kernel, and a slot with its own ref
+  pushes that notebook with the owning account's token.
+- `npm run typecheck` → exit 0 · `bun run lint` → exit 0 (pre-existing warnings only).
+- `bun --filter @ostra/web build` → exit 0 (`/runner` and `/management` in the route table).

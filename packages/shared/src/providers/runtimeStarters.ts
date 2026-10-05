@@ -2,7 +2,7 @@
 // Abstraction for starting external runtimes. The orchestrator/scheduler depends on this,
 // not on Kaggle/Colab-specific code paths.
 
-import { kaggleConfig } from "../lib/env";
+import { kaggleApiTokensFor, kaggleKernelRef, kaggleKernelRefEnvName } from "../lib/env";
 
 export type RuntimeStartInput = {
   worker_type: string;   // script | image | voice
@@ -86,6 +86,22 @@ export function inferKaggleOwnerFromToken(token: string): string | null {
     if (u) return u;
   }
   return null;
+}
+
+/**
+ * The token to push a slot's kernel with. When the ref names an owner (`owner/slug`), prefer the
+ * configured token whose embedded account matches it (the agent notebooks live on different
+ * accounts). Otherwise take the first configured token and let Kaggle answer truthfully
+ * (401/403/404) — a wrong account is never silently re-pushed.
+ */
+function pickKaggleToken(workerType: string, kernelRef: string): string {
+  const tokens = kaggleApiTokensFor(workerType);
+  const owner = parseKernelRef(kernelRef).owner;
+  if (owner) {
+    const match = tokens.find((t) => (inferKaggleOwnerFromToken(t) ?? "").toLowerCase() === owner.toLowerCase());
+    if (match) return match;
+  }
+  return tokens[0] ?? "";
 }
 
 export function parseKernelRef(raw: string): { owner: string | null; slug: string; raw: string } {
@@ -199,15 +215,16 @@ export class KaggleRuntimeStarter implements RuntimeStarter {
   constructor(private cfg: KaggleStartConfig = {}) {}
 
   async start(input: RuntimeStartInput): Promise<RuntimeStartOutcome> {
-    const kernelRefRaw = (input.config?.["kernelRef"] as string) ?? this.cfg.kernelRef ?? process.env.KAGGLE_KERNEL_REF ?? "";
-    // kaggleConfig() resolves the plain name first, then numbered/named tokens (KAGGLE_API_TOKEN_1, …).
-    const token = this.cfg.apiToken ?? kaggleConfig().apiToken ?? "";
+    // Each agent pushes ITS OWN notebook. The per-slot ref never falls back to the Script kernel.
+    const kernelRefRaw = (input.config?.["kernelRef"] as string) ?? this.cfg.kernelRef ?? kaggleKernelRef(input.worker_type) ?? "";
+    const token = this.cfg.apiToken ?? pickKaggleToken(input.worker_type, kernelRefRaw);
 
     if (!kernelRefRaw) {
-      return { ok: false, error: "KAGGLE_KERNEL_REF not configured (e.g. mark56/studio-script-kernel or notebook7eae283a4a)", code: "NOT_AUTOSTARTABLE", provider_response: { reason: "missing_kernel_ref" } };
+      const envName = kaggleKernelRefEnvName(input.worker_type);
+      return { ok: false, error: `${envName} is not configured on Render — set it to the ${input.worker_type} notebook ref (owner/slug)`, code: "NOT_AUTOSTARTABLE", provider_response: { reason: "missing_kernel_ref", worker_type: input.worker_type } };
     }
     if (!token) {
-      return { ok: false, error: "KAGGLE_API_TOKEN not configured on Render (Kaggle JSON key or username:key)", code: "AUTH_FAILED", provider_response: { reason: "missing_token" } };
+      return { ok: false, error: "No Kaggle token configured on Render (KAGGLE_API_TOKEN, KAGGLE_API_TOKEN_<n>, or a slot-labelled KAGGLE_API_TOKEN_<SLOT>) — Kaggle JSON key or username:key", code: "AUTH_FAILED", provider_response: { reason: "missing_token", worker_type: input.worker_type } };
     }
 
     const execDisabled = (process.env.KAGGLE_EXEC_DISABLED ?? "").toLowerCase() === "true";

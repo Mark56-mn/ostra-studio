@@ -31,8 +31,20 @@ KAGGLE_API_TOKEN=...            # server-only, JSON {username,key} or username:k
 KAGGLE_API_TOKEN_1=...          # more Kaggle account tokens (each owns ONE account). Priority: plain name
 KAGGLE_API_TOKEN_2=...          #   first, then _<n> in numeric order. Probed live before every push.
 KAGGLE_API_TOKEN_<name>=...     #   A valid-but-empty account reports authenticated, owner unknown.
-KAGGLE_KERNEL_REF=bettertrade/notebook7eae283a4a  # REQUIRED exact notebook ref (owner/slug)
+KAGGLE_KERNEL_REF=bettertrade/notebook7eae283a4a  # Script AI's notebook ref (owner/slug). REQUIRED to start Script.
 KAGGLE_EXEC_DISABLED=false      # true => probe-only, no push
+
+# Per-agent Kaggle notebooks. Each agent pushes ITS OWN notebook; there is NO fallback to
+# KAGGLE_KERNEL_REF, because re-pushing the Script kernel as another agent is forbidden. A slot whose
+# ref is unset is refused by name (409 not_autostartable) — never started with somebody else's kernel.
+# Run scripts/kaggle-agent-notebook.ts --agent=<slot> --apply to create/refresh the notebook, then set
+# its ref here. Owner/slug is preferred; the starter picks the configured token whose account owns it.
+KAGGLE_KERNEL_REF_IMAGE=<owner>/ostra-image-agent        # Image AI (Run Now / scheduler)
+KAGGLE_KERNEL_REF_VOICE=<owner>/ostra-voice-agent        # Voice AI
+KAGGLE_KERNEL_REF_OVERSEER=<owner>/ostra-showrunner-agent  # Showrunner (overseer)
+KAGGLE_API_TOKEN_IMAGE=...      # optional: slot-labelled token (same shape as KAGGLE_API_TOKEN_<name>)
+KAGGLE_API_TOKEN_VOICE=...      #   Wins over the numbered/named list for that slot only.
+KAGGLE_API_TOKEN_OVERSEER=...   #   <SLOT>_KAGGLE_API_TOKEN (e.g. IMAGE_KAGGLE_API_TOKEN) also works.
 
 # Colab Image / Voice — real auto-start via POST https://colaboratory.googleapis.com/v1beta/runtimes
 # When unset, starters truthfully return NOT_AUTOSTARTABLE/AUTH_FAILED — no fake start.
@@ -56,7 +68,28 @@ YOUTUBE_REDIRECT_URI=
 # Orchestrator
 AUTO_PUBLISH=false
 PORT=3001
+
+# --- Management Team (hosted, OpenAI-compatible) ---
+# A planning agent the director talks to. It briefs Script/Image/Voice and the Showrunner through the
+# real channel, writes the store, and — only with autonomy=full — asks the supervisor to start a
+# runtime. Any OpenAI-compatible endpoint works; only base_url + bearer key are used (no SDK).
+MANAGER_API_KEY=...                 # required for the slot to exist; OPENAI_API_KEY is the fallback
+MANAGER_BASE_URL=https://lightning.ai/api/v1/   # any OpenAI-compatible base; OPENAI_BASE_URL fallback
+MANAGER_CHAT_MODEL=openai/gpt-5.6-luna          # model id that endpoint expects
+MANAGER_AUTONOMY=instruct           # off (default) | instruct | full — unknown values grant nothing
 ```
+
+`MANAGER_API_KEY` is the only required one; the other two fall back to `OPENAI_*`, so an operator who
+already has a hosted key needs no second key. Health is **not** derived from these variables: the slot
+is reported `ONLINE` only after a real, tiny completion call succeeds (`probeHostedModel`, cached 60s),
+`ERROR` with the real reason when that call fails, and `NOT_CONFIGURED — Set MANAGER_API_KEY …` when no
+key exists. A key alone never makes it ONLINE.
+
+`MANAGER_AUTONOMY` is the whole autonomy gate, and it is enforced server-side per requested target:
+- `off` (default) — the model may talk, but any `start` it asks for is refused with that reason.
+- `instruct` — it may brief every agent including the Showrunner, but not start runtimes.
+- `full` — it may additionally request a start; each target is still checked against the real autostart
+  path (`autostartRefusal`) and runs through the same `runNowByWorker` the Run Now button uses.
 
 ### Model switches — `GET /api/models` / `PATCH /api/models/:key`
 
@@ -128,6 +161,32 @@ An agent's envelope is `{"reply": …, "messages": [{"to":"image","kind":"reques
 Agent Chat (audited in `events` as `agent.store_change`, actor `agent:<role>`). The Showrunner uses a
 dedicated `overseer` worker when one is ONLINE, else the Script AI worker; the roster `detail` always
 says which one answered.
+
+### Management Team — `GET /api/agents/management` · `POST /api/agents/rooms/:id/manage`
+
+A fifth role: a **hosted** planning model the director talks to. It is not a worker row and never
+heartbeats, so it is absent from `/api/workers` and resolved by `resolveManagerBackend()`.
+
+```
+GET  /api/agents/management            → { autonomy, available, provider, model, endpointHost, detail,
+                                          startable: [{ target, ok, error? }], timestamp }
+POST /api/agents/rooms/:id/manage      → body { brief?: string (≤8000 chars), note?: string }
+                                        → { turn, autonomy, messages, roster }
+                                        503 { error: "NO_MANAGEMENT_BACKEND", reason, turn } when unconfigured
+```
+
+One `manage` call = one turn: the brief is stored first, then the model is called with the real channel
+and the real store, and **only what it actually emitted** is persisted — peer `messages` (kind
+`instruction` included), additive `actions`, and the `start` list. `turn.starts` reports the supervisor's
+real answer per target (`requested`, `refused_autonomy`, `not_autostartable`, `skipped_*`, …); a refusal is
+data, not a hidden error.
+
+`POST /api/agents/rooms/:id/dispatch` now runs the management turn FIRST (`manager: false` opts out), so its
+instructions are in the inbox of every agent the round calls next. An unconfigured management team is skipped
+silently in the round and reported by `GET /api/agents/management` instead of adding a failing turn.
+
+`rosterModels()` in `scripts/kaggle-model-benchmark.ts` skips hosted roles: the management team is never a
+Kaggle GPU candidate.
 
 `POST …/messages` is one turn: the human message is stored **first**, then the model is called with the live
 store snapshot in its system prompt, then the requested store writes are applied, then the assistant row is

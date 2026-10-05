@@ -24,6 +24,7 @@ import {
   type AgentStoreSnapshot,
 } from "@ostra/shared";
 import { callAgent, publicBackend, resolveChannelBackend, type AgentMessage } from "./agentRuntime.js";
+import { applyManagerStarts, type ManagerStartOutcome } from "./managerAutonomy.js";
 import { applyStoreActions, readStoreSnapshot, type AppliedAction } from "./storeActions.js";
 
 /** How many channel rows we keep in context and return. */
@@ -56,6 +57,10 @@ export type AgentTurnResult = {
   applied: AppliedAction[];
   rejected: string[];
   error: string | null;
+  /** Worker types the model asked to start. Only the management team may return these. */
+  startsRequested?: string[];
+  /** What the supervisor actually did (or refused to do) about those starts. */
+  starts?: ManagerStartOutcome[];
 };
 
 export async function loadChannel(supa: SupabaseClient, roomId: string): Promise<ChannelRow[]> {
@@ -156,6 +161,7 @@ export async function runAgentTurn(
       applied: [],
       rejected: [],
       error: status.detail,
+      ...(agent === "manager" ? { startsRequested: [], starts: [] } : {}),
     };
   }
 
@@ -170,13 +176,16 @@ export async function runAgentTurn(
         messages: channel,
         directorNote: args.directorNote ?? null,
         overseer,
+        manager: agent === "manager",
       }),
     },
     {
       role: "user",
       content: overseer
         ? "It is your turn to report. Read the channel and the store and answer with the JSON envelope."
-        : `It is ${label}'s turn. Answer with the JSON envelope.`,
+        : agent === "manager"
+          ? "It is the Management Team's turn. Direct the production agents and answer with the JSON envelope."
+          : `It is ${label}'s turn. Answer with the JSON envelope.`,
     },
   ];
 
@@ -193,10 +202,14 @@ export async function runAgentTurn(
       applied: [],
       rejected: [],
       error: `${call.code}: ${call.error}`,
+      ...(agent === "manager" ? { startsRequested: [], starts: [] } : {}),
     };
   }
 
   const reply = parseAgentResponse(call.content, call.reasoning);
+  // Only the management team may ask for a runtime to start, and even then every target is re-checked
+  // against the autonomy gate and the real autostart path before anything runs.
+  const starts = agent === "manager" ? await applyManagerStarts(supa, reply.starts) : null;
   const store = await applyStoreActions(supa, reply.actions, projectId, `agent:${agent}`);
   const backendInfo = { ...publicBackend(backend), latencyMs: call.latencyMs, parse: reply.parse };
   const payload: Record<string, unknown> = {};
@@ -248,18 +261,35 @@ export async function runAgentTurn(
     applied: store.applied,
     rejected: reply.rejected,
     error: null,
+    ...(starts ? { startsRequested: reply.starts, starts } : {}),
   };
 }
 
 /**
- * One full round: each production agent in order, then the Showrunner. Bounded — every agent is
- * called at most once, so a chatty model cannot spin the round forever.
+ * One full round: the Management Team first (so its instructions are in the inbox of every agent the
+ * round calls next), then each production agent in order, then the Showrunner. Bounded — every agent
+ * is called at most once, so a chatty model cannot spin the round forever.
  */
 export async function runProductionRound(
   supa: SupabaseClient,
-  args: { roomId: string; projectId: string | null; directorNote?: string | null; overseer?: boolean }
+  args: {
+    roomId: string;
+    projectId: string | null;
+    directorNote?: string | null;
+    overseer?: boolean;
+    /** Set false to skip the management team's turn (it is skipped when it is not configured). */
+    manager?: boolean;
+  }
 ): Promise<{ turns: AgentTurnResult[]; changed: number; failedWrites: number }> {
   const turns: AgentTurnResult[] = [];
+
+  if (args.manager !== false) {
+    // An unconfigured management team must not add a noise row to the round: it is skipped here and
+    // reported by the roster / manager route instead.
+    const { backend } = await resolveChannelBackend(supa, "manager");
+    if (backend) turns.push(await runAgentTurn(supa, { ...args, agent: "manager" }));
+  }
+
   for (const agent of AGENT_CHANNEL_ORDER) {
     turns.push(await runAgentTurn(supa, { ...args, agent, overseer: false }));
   }

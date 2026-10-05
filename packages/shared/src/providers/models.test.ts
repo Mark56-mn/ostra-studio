@@ -49,7 +49,7 @@ describe("MODEL_CATALOG", () => {
   it("covers exactly the switchable AI slots, and never storage", () => {
     assert.deepEqual(
       [...MODEL_CATALOG.map((m) => m.providerId)].sort(),
-      ["image", "overseer", "script", "video", "voice", "youtube"]
+      ["image", "manager", "overseer", "script", "video", "voice", "youtube"]
     );
   });
 
@@ -62,9 +62,9 @@ describe("MODEL_CATALOG", () => {
     }
   });
 
-  it("marks only Script AI autostartable and explains every refusal", () => {
+  it("marks every Kaggle agent autostartable and explains every refusal", () => {
     const startable = MODEL_CATALOG.filter((m) => m.autostart).map((m) => m.providerId);
-    assert.deepEqual(startable, ["script"]);
+    assert.deepEqual(startable, ["script", "image", "voice", "overseer"]);
     for (const m of MODEL_CATALOG.filter((e) => !e.autostart)) {
       assert.ok(m.autostartNote && m.autostartNote.length > 20, `${m.key} must explain why it cannot start`);
       assert.ok(!/secret|token/i.test(m.autostartNote), `${m.key} note must not mention secrets`);
@@ -158,15 +158,9 @@ describe("modelDispatchState", () => {
 });
 
 describe("autostartRefusal", () => {
-  it("allows the slot the orchestrator can really start", () => {
-    assert.equal(autostartRefusal("script"), null);
-  });
-
-  it("refuses the agent notebooks a human starts in Kaggle, with the real reason", () => {
-    for (const id of ["image", "voice", "overseer"]) {
-      const refusal = autostartRefusal(id);
-      assert.ok(refusal && refusal.length > 20, `${id} must refuse with a reason`);
-      assert.match(refusal, /Kaggle/);
+  it("allows every Kaggle agent slot, each of which pushes its own notebook", () => {
+    for (const id of ["script", "image", "voice", "overseer"]) {
+      assert.equal(autostartRefusal(id), null, `${id} must have an autostart path`);
     }
   });
 

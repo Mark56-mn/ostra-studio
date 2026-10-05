@@ -15,9 +15,17 @@
 //    A model that did not think produces no reasoning at all — it is never invented.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { agentLabel, workerDisplayHealth, type AgentKind, type WorkerHealthRow } from "@ostra/shared";
+import {
+  agentLabel,
+  makeHealth,
+  managerConfig,
+  workerDisplayHealth,
+  type AgentKind,
+  type ProviderHealth,
+  type WorkerHealthRow,
+} from "@ostra/shared";
 
-export type AgentBackendKind = "project_worker" | "hosted_fallback";
+export type AgentBackendKind = "project_worker" | "hosted_fallback" | "hosted_manager";
 
 /** A resolved, callable backend. `endpoint` is server-side only. */
 export type AgentBackend = {
@@ -231,11 +239,125 @@ export function resolveAgentBackend(supa: SupabaseClient) {
 }
 
 /**
+ * The Management Team's backend. It is a HOSTED, OpenAI-compatible endpoint (MANAGER_API_KEY +
+ * MANAGER_BASE_URL — OpenAI, Lightning AI, a gateway, …), so there is no worker row and no heartbeat:
+ * its live state comes from a real completion call (see `probeHostedModel`), never from configuration
+ * alone. Every other agent keeps using `resolveChannelBackend`.
+ */
+export function managerBackend(): AgentBackend {
+  const cfg = managerConfig();
+  const base = cfg.baseUrl!.replace(/\/+$/, "");
+  return {
+    kind: "hosted_manager",
+    provider: cfg.provider,
+    model: cfg.model!,
+    endpoint: base,
+    endpointHost: cfg.host,
+    workerId: null,
+  };
+}
+
+export function resolveManagerBackend(): { backend: AgentBackend | null; status: AgentBackendStatus } {
+  const cfg = managerConfig();
+  const candidates: AgentCandidate[] = [];
+  if (!cfg.configured) {
+    return {
+      backend: null,
+      status: {
+        available: false,
+        kind: null,
+        provider: null,
+        model: null,
+        endpointHost: cfg.host,
+        detail: cfg.reason ?? "the management team is not configured",
+        candidates,
+      },
+    };
+  }
+  const backend = managerBackend();
+  return {
+    backend,
+    status: {
+      available: true,
+      kind: backend.kind,
+      provider: backend.provider,
+      model: backend.model,
+      endpointHost: backend.endpointHost,
+      detail: `The management team is a hosted model at ${backend.endpointHost}. It is only reported ONLINE after a real completion call succeeds.`,
+      candidates,
+    },
+  };
+}
+
+/**
+ * Real liveness evidence for a hosted model: one tiny completion. The result is cached briefly so a
+ * dashboard poll every few seconds does not turn into a billable call per render. Never throws —
+ * the caller always gets a health object with the real failure reason.
+ */
+const HOSTED_PROBE_TTL_MS = 60_000;
+const hostedProbeCache = new Map<string, { at: number; health: ProviderHealth }>();
+
+/** Drop cached probes (tests / after an operator changes the manager key). */
+export function clearHostedProbeCache(): void {
+  hostedProbeCache.clear();
+}
+
+export async function probeHostedModel(
+  backend: AgentBackend,
+  opts: { timeoutMs?: number; nowMs?: number } = {}
+): Promise<ProviderHealth> {
+  const now = opts.nowMs ?? Date.now();
+  const cacheKey = `${backend.endpoint}|${backend.model}`;
+  const cached = hostedProbeCache.get(cacheKey);
+  if (cached && now - cached.at < HOSTED_PROBE_TTL_MS) return cached.health;
+
+  const started = Date.now();
+  const health = await (async (): Promise<ProviderHealth> => {
+    try {
+      const res = await callAgent(
+        backend,
+        [
+          { role: "system", content: "Answer with one short word." },
+          { role: "user", content: "ping" },
+        ],
+        { temperature: 0, maxTokens: 8 }
+      );
+      const latencyMs = Date.now() - started;
+      if (!res.ok) {
+        return makeHealth("ERROR", {
+          provider: backend.provider,
+          reason: `hosted model did not answer — ${res.code}: ${res.error}`,
+          latencyMs,
+          detail: { model: backend.model, endpointHost: backend.endpointHost },
+        });
+      }
+      return makeHealth("ONLINE", {
+        provider: backend.provider,
+        reason: `hosted model answered a real completion call in ${latencyMs}ms`,
+        latencyMs,
+        detail: { model: backend.model, endpointHost: backend.endpointHost, probedAt: new Date(now).toISOString() },
+      });
+    } catch (e) {
+      return makeHealth("ERROR", {
+        provider: backend.provider,
+        reason: `hosted model probe failed: ${e instanceof Error ? e.message : String(e)}`,
+        latencyMs: Date.now() - started,
+        detail: { model: backend.model, endpointHost: backend.endpointHost },
+      });
+    }
+  })();
+
+  hostedProbeCache.set(cacheKey, { at: now, health });
+  return health;
+}
+
+/**
  * The backend for a production-channel role. The Showrunner prefers a dedicated `overseer` notebook
  * and falls back to the Script AI worker (a real model, just not a dedicated overseer) — the status
  * `detail` always says which one actually answered.
  */
 export function resolveChannelBackend(supa: SupabaseClient, agent: AgentKind) {
+  if (agent === "manager") return resolveManagerBackend();
   if (agent === "overseer") {
     return resolveAgentBackendFor(supa, ["overseer", "script"], { label: "Showrunner" });
   }
@@ -255,6 +377,21 @@ function readContent(payload: unknown): string | null {
   const first = choices[0] as { message?: { content?: unknown }; text?: unknown };
   const fromMessage = first?.message?.content;
   if (typeof fromMessage === "string" && fromMessage.trim()) return fromMessage;
+  // Some OpenAI-compatible servers (and every reasoning model behind them) return content as a list of
+  // parts: [{"type":"text","text":"…"}]. Join the text parts instead of reporting an empty answer.
+  if (Array.isArray(fromMessage)) {
+    const text = fromMessage
+      .map((part) =>
+        typeof part === "string"
+          ? part
+          : typeof part === "object" && part !== null && typeof (part as { text?: unknown }).text === "string"
+            ? (part as { text: string }).text
+            : ""
+      )
+      .join("")
+      .trim();
+    if (text) return text;
+  }
   if (typeof first?.text === "string" && first.text.trim()) return first.text;
   // Some minimal servers return the raw string in `response`.
   const alt = (payload as { response?: unknown }).response;
@@ -283,7 +420,7 @@ function readReasoning(payload: unknown): string | null {
 export async function callAgent(
   backend: AgentBackend,
   messages: AgentMessage[],
-  opts: { temperature?: number } = {}
+  opts: { temperature?: number; maxTokens?: number; timeoutMs?: number } = {}
 ): Promise<AgentChatResult> {
   const started = Date.now();
   const headers: Record<string, string> = {
@@ -294,7 +431,27 @@ export async function callAgent(
   };
   let body: Record<string, unknown>;
 
-  if (backend.kind === "hosted_fallback") {
+  if (backend.kind === "hosted_manager") {
+    const key = managerConfig().apiKey;
+    if (!key) {
+      return {
+        ok: false,
+        code: "UNREACHABLE",
+        error: "MANAGER_API_KEY is not configured on the backend",
+        latencyMs: 0,
+        backend,
+      };
+    }
+    headers["Authorization"] = `Bearer ${key}`;
+    body = {
+      model: backend.model,
+      messages,
+      temperature: opts.temperature ?? 0.4,
+      max_tokens: opts.maxTokens ?? maxTokens(),
+      stream: false,
+      response_format: { type: "json_object" },
+    };
+  } else if (backend.kind === "hosted_fallback") {
     const key = process.env.OPENAI_API_KEY?.trim();
     if (!key) {
       return {
@@ -324,7 +481,8 @@ export async function callAgent(
     };
   }
 
-  const url = backend.kind === "hosted_fallback" ? `${backend.endpoint}/chat/completions` : `${backend.endpoint}/v1/chat/completions`;
+  const hosted = backend.kind === "hosted_fallback" || backend.kind === "hosted_manager";
+  const url = hosted ? `${backend.endpoint}/chat/completions` : `${backend.endpoint}/v1/chat/completions`;
 
   let res: Response;
   try {
@@ -332,7 +490,7 @@ export async function callAgent(
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs()),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? timeoutMs()),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

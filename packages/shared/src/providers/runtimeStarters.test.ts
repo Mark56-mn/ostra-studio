@@ -120,6 +120,65 @@ describe("runtimeStarters", () => {
     }
   });
 
+  // ── Kaggle: per-agent slots never share a kernel ──────────────
+  it("refuses a non-script slot whose OWN ref is unset (never falls back to the Script kernel)", async () => {
+    const envKeys = ["KAGGLE_KERNEL_REF", "KAGGLE_KERNEL_REF_IMAGE", "KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2"] as const;
+    saveEnv([...envKeys]);
+    process.env.KAGGLE_KERNEL_REF = "bettertrade/notebook7eae283a4a";
+    process.env.KAGGLE_API_TOKEN = "bettertrade:script-key";
+    delete process.env.KAGGLE_KERNEL_REF_IMAGE;
+    try {
+      const s = new KaggleRuntimeStarter({});
+      const r = await s.start({ worker_type: "image", runtime: "kaggle", provider: "kaggle", trigger_source: "run_now", config: {} });
+      assert.equal(r.ok, false);
+      assert.equal((r as { code?: string }).code, "NOT_AUTOSTARTABLE");
+      assert.match(String((r as { error?: string }).error), /KAGGLE_KERNEL_REF_IMAGE/);
+      assert.ok(!String((r as { error?: string }).error).includes("notebook7eae283a4a"), "must not name the Script kernel");
+    } finally {
+      restoreEnv([...envKeys]);
+    }
+  });
+
+  it("pushes the slot's OWN notebook and picks the token whose account owns it", async () => {
+    const envKeys = ["KAGGLE_KERNEL_REF", "KAGGLE_KERNEL_REF_IMAGE", "KAGGLE_API_TOKEN", "KAGGLE_API_TOKEN_1", "KAGGLE_API_TOKEN_2"] as const;
+    saveEnv([...envKeys]);
+    process.env.KAGGLE_KERNEL_REF_IMAGE = "emmanuelofoye/ostra-image-agent";
+    process.env.KAGGLE_API_TOKEN_1 = "bettertrade:key1";
+    process.env.KAGGLE_API_TOKEN_2 = "emmanuelofoye:key2";
+    delete process.env.KAGGLE_KERNEL_REF;
+    delete process.env.KAGGLE_API_TOKEN;
+    const calls: string[] = [];
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const auth = ((init?.headers as Record<string, string> | undefined)?.Authorization) ?? "";
+      calls.push(`${init?.method ?? "GET"} ${url} auth=${auth}`);
+      if (url.includes("/api/v1/kernels/list?pageSize=1")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/api/v1/kernels/pull") && (init?.method ?? "GET") !== "POST") {
+        return new Response(JSON.stringify({ blob: { source: "print('image agent')", language: "python", kernelType: "notebook" }, metadata: { isPrivate: true, enableInternet: true, enableGpu: true } }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/api/v1/kernels/push")) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        assert.equal(body["slug"], "emmanuelofoye/ostra-image-agent");
+        return new Response(JSON.stringify({ ref: "/code/emmanuelofoye/ostra-image-agent", versionNumber: 3 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response("not mocked", { status: 500 });
+    };
+    try {
+      const s = new KaggleRuntimeStarter({});
+      const r = await s.start({ worker_type: "image", runtime: "kaggle", provider: "kaggle", trigger_source: "run_now", config: {} });
+      assert.equal(r.ok, true);
+      if (r.ok) assert.equal(r.provider_run_id, "emmanuelofoye/ostra-image-agent@v3");
+      // The push must use the owning account's token, not merely the first configured one.
+      const owningAuth = `Basic ${Buffer.from("emmanuelofoye:key2").toString("base64")}`;
+      const push = calls.find((c) => c.includes("/kernels/push")) ?? "";
+      assert.ok(push.includes(owningAuth), `push must use the owning token, got: ${push}`);
+    } finally {
+      restoreEnv([...envKeys]);
+    }
+  });
+
   it("Kaggle starter requires token", async () => {
     const s = new KaggleRuntimeStarter({});
     const origTok = process.env.KAGGLE_API_TOKEN;

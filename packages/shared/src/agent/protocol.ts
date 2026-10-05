@@ -49,7 +49,15 @@ export type AgentParse = "json" | "text_fallback";
 // director, while `messages` is delivered to named peers. Both travel inside the same JSON envelope,
 // and a message is only ever recorded when the model actually emitted it — never inferred.
 
-export const AGENT_MESSAGE_KINDS = ["brief", "position", "request", "handoff", "report", "ack"] as const;
+export const AGENT_MESSAGE_KINDS = [
+  "brief",
+  "position",
+  "request",
+  "handoff",
+  "report",
+  "ack",
+  "instruction",
+] as const;
 export type AgentMessageKind = (typeof AGENT_MESSAGE_KINDS)[number];
 
 const MESSAGE_KIND_SET = new Set<string>(AGENT_MESSAGE_KINDS);
@@ -57,12 +65,57 @@ export function isAgentMessageKind(value: unknown): value is AgentMessageKind {
   return typeof value === "string" && MESSAGE_KIND_SET.has(value);
 }
 
-/** Everyone who can appear in a channel: the four AI roles plus the human director. */
-export const AGENT_PARTICIPANTS = ["director", "script", "image", "voice", "overseer"] as const;
+/** Everyone who can appear in a channel: the four AI roles, the management team and the human director. */
+export const AGENT_PARTICIPANTS = [
+  "director",
+  "manager",
+  "script",
+  "image",
+  "voice",
+  "overseer",
+] as const;
 export type AgentParticipant = (typeof AGENT_PARTICIPANTS)[number];
 
 export function isAgentParticipant(value: unknown): value is AgentParticipant {
   return typeof value === "string" && (AGENT_PARTICIPANTS as readonly string[]).includes(value);
+}
+
+/**
+ * Resolve who a model addressed, accepting the agent's ID *or* the label the prompt actually uses
+ * ("Script AI", "Management Team", "Showrunner"). Without this an instruction addressed the way the
+ * prompt tells the model to address it is silently DROPPED — the model did the right thing and the
+ * backend threw it away.
+ */
+const PARTICIPANT_ALIASES: Readonly<Record<string, AgentParticipant>> = {
+  director: "director",
+  human: "director",
+  manager: "manager",
+  management: "manager",
+  "management team": "manager",
+  management_team: "manager",
+  script: "script",
+  "script ai": "script",
+  script_ai: "script",
+  writer: "script",
+  image: "image",
+  "image ai": "image",
+  image_ai: "image",
+  art: "image",
+  voice: "voice",
+  "voice ai": "voice",
+  voice_ai: "voice",
+  audio: "voice",
+  overseer: "overseer",
+  showrunner: "overseer",
+  "show runner": "overseer",
+};
+
+export function resolveParticipant(value: unknown): AgentParticipant | null {
+  if (typeof value !== "string") return null;
+  const key = value.trim().toLowerCase();
+  if (!key) return null;
+  if (isAgentParticipant(key)) return key;
+  return PARTICIPANT_ALIASES[key] ?? null;
 }
 
 /** One message an agent addressed at a named peer. */
@@ -89,7 +142,32 @@ export type AgentReply = {
   reasoning: string;
   /** Messages this agent explicitly addressed at its peers. Empty when it addressed none. */
   messages: AgentOutboundMessage[];
+  /**
+   * Worker types this agent asked to be STARTED (e.g. `["script"]`). Collected from the model, never
+   * acted upon here: the server checks the autonomy gate and the real autostart path for every target
+   * before anything runs, and reports what actually happened.
+   */
+  starts: string[];
 };
+
+/** Longest start target list accepted from a model (bounds the directive parser). */
+export const AGENT_MAX_STARTS = 8;
+
+const STARTABLE_PARTICIPANTS = new Set<string>(["script", "image", "voice", "overseer", "manager"]);
+
+function normalizeStarts(raw: unknown): string[] {
+  const list = Array.isArray(raw) ? raw : isPlainObject(raw) ? [raw] : typeof raw === "string" ? [raw] : [];
+  const out: string[] = [];
+  for (const item of list) {
+    const value = typeof item === "string" ? item : isPlainObject(item) ? (item.target ?? item.worker_type ?? item.agent) : null;
+    if (typeof value !== "string") continue;
+    const target = value.trim().toLowerCase();
+    if (!STARTABLE_PARTICIPANTS.has(target) || out.includes(target)) continue;
+    out.push(target);
+    if (out.length >= AGENT_MAX_STARTS) break;
+  }
+  return out;
+}
 
 /** Longest reply we accept from a model before truncating it for display (defensive, not a spec). */
 export const AGENT_REPLY_MAX_CHARS = 8000;
@@ -216,8 +294,8 @@ function normalizeOutboundMessages(raw: unknown): AgentOutboundMessage[] {
   for (const item of list) {
     if (!isPlainObject(item)) continue;
     const toRaw = item.to ?? item.target ?? item.recipient ?? item.agent;
-    const to = typeof toRaw === "string" ? toRaw.trim().toLowerCase() : "";
-    if (!isAgentParticipant(to)) continue;
+    const to = resolveParticipant(toRaw);
+    if (!to) continue;
     const contentRaw = item.content ?? item.message ?? item.text ?? item.body;
     const content = typeof contentRaw === "string" ? contentRaw.trim() : "";
     if (!content) continue;
@@ -276,11 +354,12 @@ export function parseAgentResponse(raw: string | null | undefined, explicitReaso
     const replyRaw = parsed.reply ?? parsed.message ?? parsed.response ?? parsed.text;
     const { actions, rejected } = normalizeActions(parsed.actions ?? parsed.action ?? []);
     const messages = normalizeOutboundMessages(parsed.messages ?? parsed.message_to ?? parsed.outbox ?? []);
+    const starts = normalizeStarts(parsed.start ?? parsed.starts ?? parsed.start_workers ?? []);
     const reply = typeof replyRaw === "string" ? replyRaw.trim() : "";
     // A valid envelope needs a reply, some actions, or at least one peer message. An envelope with
     // only peer messages is real (the agent addressed a peer and said nothing to the director), and
     // unrelated JSON with none of those is skipped so it can still fall back to prose.
-    if (!reply && actions.length === 0 && rejected.length === 0 && messages.length === 0) continue;
+    if (!reply && actions.length === 0 && rejected.length === 0 && messages.length === 0 && starts.length === 0) continue;
     // A server forced into JSON mode can only express its thinking INSIDE the envelope, so accept a
     // `reasoning` / `reasoning_content` / `thinking` key on it as well as a separate channel.
     const envelopeReasoning = [parsed.reasoning, parsed.reasoning_content, parsed.thinking].find(
@@ -293,6 +372,7 @@ export function parseAgentResponse(raw: string | null | undefined, explicitReaso
       rejected,
       reasoning: combineReasoning(reasoning, envelopeReasoning),
       messages,
+      starts,
     };
   }
   return {
@@ -302,6 +382,7 @@ export function parseAgentResponse(raw: string | null | undefined, explicitReaso
     rejected: [],
     reasoning,
     messages: [],
+    starts: [],
   };
 }
 

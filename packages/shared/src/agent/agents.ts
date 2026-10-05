@@ -21,8 +21,8 @@ import {
   type AgentStoreSnapshot,
 } from "./protocol";
 
-/** The four AI roles that exist in a production channel. `director` is the human and is never an agent. */
-export type AgentKind = "script" | "image" | "voice" | "overseer";
+/** The AI roles that exist in a production channel. `director` is the human and is never an agent. */
+export type AgentKind = "manager" | "script" | "image" | "voice" | "overseer";
 
 /** One role's static identity. Status is NEVER stored here — it comes from the live worker registry. */
 export type AgentProfile = {
@@ -47,6 +47,27 @@ export type AgentProfile = {
 };
 
 export const AGENT_ROSTER: readonly AgentProfile[] = [
+  {
+    kind: "manager",
+    label: "Management Team",
+    workerType: "manager",
+    provider: "hosted",
+    runtime: "hosted",
+    model: "hosted-openai-compatible",
+    capabilities: [
+      "direction",
+      "briefing",
+      "prioritisation",
+      "agent_instructions",
+      "runtime_requests",
+      "progress_reporting",
+    ],
+    specialty:
+      "Talks to the director, issues instructions to every agent (including the Showrunner), and reports the real state.",
+    promptRole:
+      "You are the Management Team of Ostra Studio — a hosted planning agent. You talk to the human director and you give the production agents their instructions. You decide what gets produced next (episodes, scenes, art, audio), you brief Script AI, Image AI, Voice AI and the Showrunner, and you report back what really happened. You never claim work that is not visible in the channel or the store.",
+    accent: "text-[#FFD166]",
+  },
   {
     kind: "script",
     label: "Script AI",
@@ -124,6 +145,13 @@ export const AGENT_ROSTER: readonly AgentProfile[] = [
 /** The people/agents a message can be addressed to, in channel order. */
 export const AGENT_CHANNEL_ORDER: readonly AgentKind[] = ["script", "image", "voice"] as const;
 
+/**
+ * Every agent kind that can appear in the UI/API: the management team, the three production agents
+ * and the Showrunner. The management team is NOT in `AGENT_CHANNEL_ORDER` — it speaks first and is
+ * never asked to produce an episode in the production round.
+ */
+export const AGENT_ALL_KINDS: readonly AgentKind[] = ["manager", "overseer", ...AGENT_CHANNEL_ORDER] as const;
+
 export function agentProfile(kind: AgentKind): AgentProfile {
   const found = AGENT_ROSTER.find((a) => a.kind === kind);
   // The roster is total over AgentKind; this can only trip if the type and the array drift apart.
@@ -191,19 +219,30 @@ export function buildAgentChannelPrompt(args: {
   directorNote?: string | null;
   /** True for the overseer, which reports instead of producing. */
   overseer?: boolean;
+  /** True for the management team, which directs instead of producing. */
+  manager?: boolean;
 }): string {
   const { agent, snapshot, messages, directorNote } = args;
   const profile = agentProfile(agent);
-  const others = AGENT_CHANNEL_ORDER.filter((k) => k !== agent && k !== "overseer").map(agentLabel);
+  const others = AGENT_ALL_KINDS.filter((k) => k !== agent).map(agentLabel);
 
-  const rules = args.overseer
+  const rules = args.manager
     ? [
-        "You are the Showrunner: do NOT write story, art or audio yourself and do NOT request store changes unless a fix is genuinely missing.",
-        "Read the channel and the store. Report what each agent actually did, where they disagree, and what is blocked or unowned.",
-        "Use `messages` only to ask a specific agent to resolve a specific conflict. Use `reply` for the director's report.",
-        "Never claim an agent finished work that is not visible in the channel. If you cannot tell, say so.",
+        "You are the Management Team: you direct, you do not write the episodes yourself.",
+        "`reply` is your message to the human director: the plan, the priorities and the honest status. 2-8 sentences.",
+        "Give instructions with `messages`, addressed by name: Script AI, Image AI, Voice AI, Showrunner. Use kind `instruction` when you are directing, `brief` when you hand over work, `request` when you need something back.",
+        "Plan the work in `actions` — create the projects, episodes and scenes you decided on (create_project, create_episode, create_scene, create_character, update_episode …). Plan only what you actually intend to produce; never invent finished work.",
+        "Put a worker type in `start` ONLY when that agent is currently offline and you need it running (e.g. \"start\":[\"script\"]). The server checks whether it may be started and reports the real result; a start you did not ask for never happens.",
+        "Never report an agent's work as done unless it is visible in the channel or the store.",
       ]
-    : [
+    : args.overseer
+      ? [
+          "You are the Showrunner: do NOT write story, art or audio yourself and do NOT request store changes unless a fix is genuinely missing.",
+          "Read the channel and the store. Report what each agent actually did, where they disagree, and what is blocked or unowned.",
+          "Use `messages` only to ask a specific agent to resolve a specific conflict. Use `reply` for the director's report.",
+          "Never claim an agent finished work that is not visible in the channel. If you cannot tell, say so.",
+        ]
+      : [
         "`reply` is shown to the human director. Be concrete and brief (2-6 sentences). Write in the director's language.",
         "Use `messages` for EVERYTHING you need another agent to do — one entry per peer. Only address someone when you actually need them to act or to know something.",
         `Your peers are ${others.join(", ")} and the director. Address them by those names.`,
@@ -217,7 +256,7 @@ export function buildAgentChannelPrompt(args: {
     "",
     "You are one agent in a shared Ostra Studio production channel. The director and the other agents all read it.",
     "Answer with EXACTLY ONE JSON object and nothing else — no markdown fence, no commentary:",
-    '{"reply": "<what you say to the director>", "messages": [{"to": "<agent>", "kind": "request|handoff|position|ack", "content": "<what they must know or do>"}], "actions": [ <zero or more action objects> ]}',
+    '{"reply": "<what you say to the director>", "messages": [{"to": "<agent>", "kind": "request|handoff|position|ack|instruction", "content": "<what they must know or do>"}], "actions": [ <zero or more action objects> ], "start": [ "<worker_type you need started>" ]}',
     "",
     "Rules:",
     ...rules.map((r) => `- ${r}`),

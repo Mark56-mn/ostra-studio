@@ -32,10 +32,11 @@ export type ModelCatalogEntry = {
    */
   runtime: string;
   /**
-   * Can the orchestrator start this slot itself (Run Now / scheduler tick)? Only Script AI can: it is
-   * the one notebook wired to `KAGGLE_KERNEL_REF`. The other agents live on their own Kaggle
-   * notebooks that a human starts, so pressing Run Now for them must be refused with the real reason
-   * rather than re-pushing somebody else's kernel.
+   * Can the orchestrator start this slot itself (Run Now / scheduler tick)? The four Kaggle agents
+   * (script / image / voice / overseer) each push their OWN notebook: Script via `KAGGLE_KERNEL_REF`,
+   * the others via `KAGGLE_KERNEL_REF_<SLOT>`. Whether a slot's ref is actually set is an environment
+   * fact reported by the runner (`kaggleKernelRef`) — never assumed here — so an unconfigured slot
+   * refuses with the exact missing variable instead of re-pushing somebody else's kernel.
    */
   autostart: boolean;
   /** The exact blocker when `autostart` is false. Never a secret. */
@@ -53,6 +54,19 @@ export type ModelCatalogEntry = {
  */
 export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
   {
+    key: "manager-hosted",
+    providerId: "manager",
+    modelRef: "hosted",
+    label: "Management Team · hosted",
+    description:
+      "Hosted management team the director talks to. It briefs the agents, writes the store and (with autonomy) asks the supervisor to start a runtime.",
+    provider: "openai-compatible",
+    runtime: "hosted",
+    autostart: false,
+    autostartNote:
+      "The management team is a hosted API, not a runtime: there is nothing to start. Its ONLINE state comes from a real completion call.",
+  },
+  {
     key: "script-qwen3-4b",
     providerId: "script",
     modelRef: "qwen3-4b",
@@ -67,36 +81,33 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     providerId: "image",
     modelRef: "qwen3-4b",
     label: "Image AI · Qwen3 4B",
-    description: "Character, environment and scene artwork plus thumbnails.",
+    description:
+      "Character, environment and scene artwork plus thumbnails. Runs from its own Kaggle notebook, started by Run Now via KAGGLE_KERNEL_REF_IMAGE.",
     provider: "kaggle",
     runtime: "kaggle",
-    autostart: false,
-    autostartNote:
-      "Image AI runs from its own Kaggle notebook (emmanuelofoye/ostra-image-agent), which a human starts in Kaggle. Run Now cannot start it: no managed runtime is configured for it, and the only other start path would re-push the Script AI kernel.",
+    autostart: true,
   },
   {
     key: "voice-qwen3-4b",
     providerId: "voice",
     modelRef: "qwen3-4b",
     label: "Voice AI · Qwen3 4B",
-    description: "Narration, dialogue and scene audio at segment level.",
+    description:
+      "Narration, dialogue and scene audio at segment level. Runs from its own Kaggle notebook, started by Run Now via KAGGLE_KERNEL_REF_VOICE.",
     provider: "kaggle",
     runtime: "kaggle",
-    autostart: false,
-    autostartNote:
-      "Voice AI runs from its own Kaggle notebook (bettertrade/ostra-voice-agent), which a human starts in Kaggle. Run Now cannot start it for the same reason as Image AI.",
+    autostart: true,
   },
   {
     key: "overseer-qwen3-4b",
     providerId: "overseer",
     modelRef: "qwen3-4b",
     label: "Showrunner · Qwen3 4B",
-    description: "Oversees the agent channel, resolves conflicts and reports real status to the director.",
+    description:
+      "Oversees the agent channel, resolves conflicts and reports real status to the director. Runs from its own Kaggle notebook, started by Run Now via KAGGLE_KERNEL_REF_OVERSEER.",
     provider: "kaggle",
     runtime: "kaggle",
-    autostart: false,
-    autostartNote:
-      "The Showrunner runs from kidscity/ostra-showrunner-agent, started by hand in Kaggle. Run Now cannot start it and must never re-push the Script AI kernel as a Showrunner.",
+    autostart: true,
   },
   {
     key: "video-ffmpeg",
@@ -123,9 +134,13 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
 ] as const;
 
 /**
- * The honest refusal for a Run Now request against a slot the orchestrator cannot start itself.
- * Returns null when the slot may be started (or is not switchable), so the caller can let the normal
+ * The honest refusal for a Run Now request against a slot the orchestrator cannot start AT ALL.
+ * Returns null when the slot has a start path (or is not switchable), so the caller can let the normal
  * path run. Pure, so the rule is unit-tested without starting anything.
+ *
+ * A slot whose start path exists but whose own kernel ref is not set on Render (e.g. Image AI with no
+ * `KAGGLE_KERNEL_REF_IMAGE`) is refused by the runner at start time with that exact variable named —
+ * see `kaggleKernelRef` / `kaggleKernelRefEnvName`. This function never guesses a ref.
  */
 export function autostartRefusal(providerSlot: string | null | undefined): string | null {
   const entry = modelForProvider(providerSlot);

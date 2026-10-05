@@ -61,7 +61,33 @@ export type AgentTurnResult = {
   applied: Array<{ op: string; ok: boolean; entity: string | null; ref: string | null; id: string | null; summary: string; error?: string }>;
   rejected: string[];
   error: string | null;
+  /** Worker types the management team asked to start (only it may return this). */
+  startsRequested?: string[];
+  /** What the supervisor actually did about those starts — including refusals. */
+  starts?: Array<{ target: string; ok: boolean; action: string; error?: string }>;
 };
+
+/** What the Management Team is allowed and able to do, read from the real environment. */
+export type ManagementPolicy = {
+  autonomy: "off" | "instruct" | "full";
+  available: boolean;
+  provider: string | null;
+  model: string | null;
+  endpointHost: string | null;
+  detail: string;
+  startable: Array<{ target: string; ok: boolean; error?: string }>;
+};
+
+export async function fetchManagementPolicy(): Promise<FetchResult<ManagementPolicy>> {
+  try {
+    const res = await apiFetch("/api/agents/management");
+    const { json, text } = await readJson(res);
+    if (!res.ok || !json) return { ok: false, error: failure(res, json, text) };
+    return { ok: true, data: json as unknown as ManagementPolicy };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 export type DispatchResponse = {
   turns: AgentTurnResult[];
@@ -167,7 +193,7 @@ export async function listChannel(roomId: string): Promise<FetchResult<ChannelSn
 
 export async function dispatchRound(
   roomId: string,
-  body: { brief?: string; note?: string; overseer?: boolean } = {}
+  body: { brief?: string; note?: string; overseer?: boolean; manager?: boolean } = {}
 ): Promise<FetchResult<DispatchResponse>> {
   try {
     const res = await apiFetch(`/api/agents/rooms/${roomId}/dispatch`, { method: "POST", body: JSON.stringify(body) });
@@ -179,7 +205,42 @@ export async function dispatchRound(
   }
 }
 
+/** ONE Management Team turn: brief + instructions + any runtime starts it was allowed to make. */
+export async function manageRoom(
+  roomId: string,
+  body: { brief?: string; note?: string } = {}
+): Promise<FetchResult<{ turn: AgentTurnResult; autonomy: string; messages: ChannelMessage[]; roster: RosterEntry[] }>> {
+  try {
+    const res = await apiFetch(`/api/agents/rooms/${roomId}/manage`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    const { json, text } = await readJson(res);
+    if (!res.ok || !json) return { ok: false, error: failure(res, json, text) };
+    return {
+      ok: true,
+      data: json as unknown as { turn: AgentTurnResult; autonomy: string; messages: ChannelMessage[]; roster: RosterEntry[] },
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 // ── pure presentation helpers (unit-tested) ──────────────────────────────────
+
+/** What the autonomy setting means, in the operator's words. Never hidden behind a label. */
+export function autonomyLabel(autonomy: string | undefined): { text: string; tone: "ok" | "warn" | "bad" } {
+  switch (autonomy) {
+    case "full":
+      return { text: "full — may brief agents and start runtimes", tone: "ok" };
+    case "instruct":
+      return { text: "instruct — may brief agents, may not start runtimes", tone: "warn" };
+    case "off":
+      return { text: "off — may talk, may not act on runtimes", tone: "bad" };
+    default:
+      return { text: "unknown", tone: "bad" };
+  }
+}
 
 /** The accent class for a participant, falling back to a neutral tone for the director. */
 export function participantAccent(kind: string): string {

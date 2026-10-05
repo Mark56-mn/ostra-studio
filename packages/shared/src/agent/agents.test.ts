@@ -28,16 +28,39 @@ const channel: ChannelMessage[] = [
 ];
 
 describe("agent roster", () => {
-  it("covers every channel role plus the overseer exactly once", () => {
+  it("covers every channel role plus the overseer and the management team exactly once", () => {
     const kinds = AGENT_ROSTER.map((a) => a.kind).sort();
-    assert.deepEqual(kinds, ["image", "overseer", "script", "voice"]);
+    assert.deepEqual(kinds, ["image", "manager", "overseer", "script", "voice"]);
     for (const kind of AGENT_CHANNEL_ORDER) assert.ok(AGENT_ROSTER.some((a) => a.kind === kind));
+    // The management team directs; it is not one of the production agents of a round.
+    assert.ok(!AGENT_CHANNEL_ORDER.includes("manager"));
   });
 
   it("labels the human director and every agent", () => {
     assert.equal(agentLabel("director"), "Director");
     assert.equal(agentLabel("script"), "Script AI");
     assert.equal(agentLabel("overseer"), "Showrunner");
+    assert.equal(agentLabel("manager"), "Management Team");
+  });
+
+  it("tells the management team how to direct, and that a start is only a request", () => {
+    const prompt = buildAgentChannelPrompt({
+      agent: "manager",
+      snapshot: null,
+      messages: [],
+      manager: true,
+    });
+    assert.match(prompt, /Management Team/);
+    assert.match(prompt, /instruction/);
+    assert.match(prompt, /"start"/);
+    // The prompt may never promise the model that a start will happen.
+    assert.doesNotMatch(prompt, /will start|guarantee/i);
+  });
+
+  it("addresses every agent by name in the envelope, including the manager", () => {
+    const prompt = buildAgentChannelPrompt({ agent: "script", snapshot: null, messages: [] });
+    assert.match(prompt, /Management Team/);
+    assert.match(prompt, /Showrunner/);
   });
 
   it("exposes a profile for each kind and throws on an unknown one", () => {

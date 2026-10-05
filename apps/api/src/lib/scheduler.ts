@@ -3,7 +3,7 @@ import { isDueNow } from "@ostra/shared";
 import { findWorkerByTypeRuntime, isHealthyWorker } from "./workerHealth.js";
 import { tryAcquireLease, releaseLease } from "./lease.js";
 import { checkModelDisabled } from "./modelControls.js";
-import { KaggleRuntimeStarter, ColabImageRuntimeStarter, ColabVoiceRuntimeStarter, findStarter, resolveRuntimeStarters, redactSecrets } from "@ostra/shared";
+import { KaggleRuntimeStarter, ColabImageRuntimeStarter, ColabVoiceRuntimeStarter, findStarter, resolveRuntimeStarters, redactSecrets, kaggleKernelRef, kaggleKernelRefEnvName } from "@ostra/shared";
 import type { RuntimeStartOutcome } from "@ostra/shared";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -230,6 +230,18 @@ async function startViaStarter(schedule: Record<string, unknown>, triggerSource:
   const worker_type = schedule.worker_type as string;
   const runtime = schedule.runtime as string;
   const provider = schedule.provider as string;
+  // Same per-slot rule as Run Now: a Kaggle schedule pushes ITS OWN notebook. The schedule's own
+  // `kernelRef` wins when an operator pinned one; otherwise the env ref for this slot is used, and a
+  // missing ref is refused by name — never replaced with somebody else's kernel.
+  const config: Record<string, unknown> = { ...schedule };
+  if (runtime === "kaggle" && !config["kernelRef"]) {
+    const kernelRef = kaggleKernelRef(worker_type);
+    if (!kernelRef) {
+      const envName = kaggleKernelRefEnvName(worker_type);
+      return { ok: false, error: `${envName} is not set on Render — ${worker_type} runs from its own Kaggle notebook`, code: "NOT_AUTOSTARTABLE", provider_response: { reason: "missing_kernel_ref", env: envName, worker_type } };
+    }
+    config["kernelRef"] = kernelRef;
+  }
   const map = resolveRuntimeStarters();
   const starter = findStarter(map, runtime, provider);
   if (!starter) {
@@ -238,10 +250,10 @@ async function startViaStarter(schedule: Record<string, unknown>, triggerSource:
     const fallback: import("@ostra/shared").RuntimeStarter | null = isColab
       ? (isVoice ? new ColabVoiceRuntimeStarter() : new ColabImageRuntimeStarter())
       : new KaggleRuntimeStarter();
-    if (fallback) return fallback.start({ worker_type, runtime, provider, trigger_source: triggerSource, config: schedule as Record<string, unknown> });
+    if (fallback) return fallback.start({ worker_type, runtime, provider, trigger_source: triggerSource, config });
     return { ok: false, error: `No starter for runtime=${runtime} provider=${provider}`, code: "NOT_AUTOSTARTABLE" } as RuntimeStartOutcome;
   }
-  return starter.start({ worker_type, runtime, provider, trigger_source: triggerSource, config: schedule as Record<string, unknown> });
+  return starter.start({ worker_type, runtime, provider, trigger_source: triggerSource, config });
 }
 
 async function insertHistory(
@@ -361,6 +373,27 @@ export async function runNowByWorker(supa: SupabaseClient, worker_type: string, 
     await emit(supa, "scheduler.skipped_already_online", worker?.id ?? null, { worker_type, runtime });
     return { action: "skipped_already_online", historyId: h?.id as string | undefined };
   }
+
+  // Per-agent kernel guard: every Kaggle agent pushes ITS OWN notebook. Without a ref for THIS slot
+  // there is no honest start path, and re-pushing the Script kernel under another agent's identity is
+  // forbidden — so refuse by name instead of pushing the wrong notebook.
+  if (runtime === "kaggle") {
+    const kernelRef = kaggleKernelRef(worker_type);
+    if (!kernelRef) {
+      const envName = kaggleKernelRefEnvName(worker_type);
+      const error = `${envName} is not set on Render — ${worker_type} runs from its own Kaggle notebook, and Run Now must never re-push the Script AI kernel. Set ${envName}=<owner>/<slug> (see scripts/kaggle-agent-notebook.ts).`;
+      const h = await insertHistory(supa, {
+        schedule_id: null, worker_type, runtime, provider,
+        trigger_source: "run_now", startup_request_id: `req:${Date.now().toString(36)}`,
+        provider_run_id: null, provider_response: null,
+        result: "not_autostartable", status: "CANCELLED", error, error_code: "NOT_AUTOSTARTABLE",
+      });
+      await emit(supa, "scheduler.skipped_not_autostartable", null, { worker_type, runtime, reason: "missing_kernel_ref", env: envName });
+      return { action: "not_autostartable", historyId: h?.id as string | undefined, error };
+    }
+    adHocConfig.kernelRef = kernelRef;
+  }
+
   const { tryAcquireLease: tryAcq, releaseLease: relLease } = await import("./lease.js");
   const ttl = 30;
   const leaseRes = await tryAcq(supa, { worker_type, runtime, trigger_source: "run_now", ttlMinutes: ttl });

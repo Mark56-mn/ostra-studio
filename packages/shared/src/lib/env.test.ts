@@ -4,7 +4,10 @@ import { describe, it } from "node:test";
 import {
   colabConfig,
   kaggleApiTokens,
+  kaggleApiTokensFor,
   kaggleConfig,
+  kaggleKernelRef,
+  kaggleKernelRefEnvName,
   supabaseConfigReason,
   supabaseServerConfigured,
   supabaseServerKey,
@@ -32,6 +35,12 @@ const TOUCHED = [
   "KIDSCITY_KAGGLE_API_TOKEN",
   "NGROK_AUTHTOKEN",
   "KAGGLE_KERNEL_REF",
+  "KAGGLE_KERNEL_REF_IMAGE",
+  "KAGGLE_KERNEL_REF_VOICE",
+  "KAGGLE_KERNEL_REF_OVERSEER",
+  "KAGGLE_API_TOKEN_IMAGE",
+  "KAGGLE_API_TOKEN_SCRIPT",
+  "IMAGE_KAGGLE_API_TOKEN",
   "KAGGLE_SCRIPT_URL",
   "GOOGLE_CLOUD_PROJECT",
   "COLAB_PROJECT_ID",
@@ -65,6 +74,55 @@ function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => T):
     }
   }
 }
+
+describe("per-agent kaggle slots", () => {
+  it("names each slot's own kernel-ref env var (script keeps the original name)", () => {
+    assert.equal(kaggleKernelRefEnvName("script"), "KAGGLE_KERNEL_REF");
+    assert.equal(kaggleKernelRefEnvName("image"), "KAGGLE_KERNEL_REF_IMAGE");
+    assert.equal(kaggleKernelRefEnvName("voice"), "KAGGLE_KERNEL_REF_VOICE");
+    assert.equal(kaggleKernelRefEnvName("overseer"), "KAGGLE_KERNEL_REF_OVERSEER");
+    assert.equal(kaggleKernelRefEnvName(" Council "), "KAGGLE_KERNEL_REF_COUNCIL");
+  });
+
+  it("reads a slot's own ref and NEVER another agent's kernel", () => {
+    withEnv({ KAGGLE_KERNEL_REF: "bettertrade/notebook7eae283a4a", KAGGLE_KERNEL_REF_IMAGE: "emmanuelofoye/ostra-image-agent" }, () => {
+      assert.equal(kaggleKernelRef("script"), "bettertrade/notebook7eae283a4a");
+      assert.equal(kaggleKernelRef("image"), "emmanuelofoye/ostra-image-agent");
+      // Voice has no ref configured: undefined, NOT the Script kernel.
+      assert.equal(kaggleKernelRef("voice"), undefined);
+    });
+  });
+
+  it("returns undefined for every slot when nothing is configured (no placeholder)", () => {
+    withEnv({}, () => {
+      for (const slot of ["script", "image", "voice", "overseer"] as const) {
+        assert.equal(kaggleKernelRef(slot), undefined, `${slot} must not invent a ref`);
+      }
+    });
+  });
+
+  it("prefers a slot-labelled token, then every configured token", () => {
+    withEnv(
+      { KAGGLE_API_TOKEN_IMAGE: "emmanuelofoye:key4", KAGGLE_API_TOKEN_1: "bettertrade:key1", KAGGLE_API_TOKEN_2: "kidscity:key2" },
+      () => {
+        // Image's own labelled token is hoisted to the front; the rest keep their normal order.
+        assert.deepEqual(kaggleApiTokensFor("image"), ["emmanuelofoye:key4", "bettertrade:key1", "kidscity:key2"]);
+        // A slot-labelled token is a real token, so other slots still see it (last, in numbered/named order).
+        assert.deepEqual(kaggleApiTokensFor("script"), ["bettertrade:key1", "kidscity:key2", "emmanuelofoye:key4"]);
+      }
+    );
+  });
+
+  it("accepts the owner-labelled token form (<NAME>_KAGGLE_API_TOKEN) for a slot", () => {
+    withEnv({ IMAGE_KAGGLE_API_TOKEN: "emmanuelofoye:key4" }, () => {
+      assert.equal(kaggleApiTokensFor("image")[0], "emmanuelofoye:key4");
+    });
+  });
+
+  it("yields an empty candidate list when no token is set (never a placeholder)", () => {
+    withEnv({}, () => assert.deepEqual(kaggleApiTokensFor("overseer"), []));
+  });
+});
 
 describe("supabase server config", () => {
   it("not configured when nothing is set", () => {

@@ -227,7 +227,7 @@ export function runResultSentence(r: {
       case "skipped_in_progress":
         return "Not started: a start is already in progress (lease held). Check the run history below.";
       case "not_autostartable":
-        return "Not started: this runtime has no start path wired up, so the orchestrator answered not_autostartable.";
+        return "Not started: the orchestrator has no usable start path for this runtime right now (not_autostartable).";
       case "max_attempts":
         return "Not started: the maximum number of start attempts in 24h was already reached.";
       case "failed":

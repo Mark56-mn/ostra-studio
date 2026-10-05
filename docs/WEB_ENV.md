@@ -31,6 +31,29 @@ What the UI shows (all from `GET /api/health` + `GET /api/workers`, never hard-c
 Leave `NEXT_PUBLIC_API_URL` empty only for local dev — the Next `/api/health` shim then reports
 `DEGRADED` + `Backend not configured (NEXT_PUBLIC_API_URL missing)`. It never invents provider states.
 
+## Management — `/management`
+
+The director's room with the **Management Team**, a hosted OpenAI-compatible model the backend calls
+(`MANAGER_API_KEY` + `MANAGER_BASE_URL` on Render — see `docs/API_ENV.md`). No secret is ever needed in
+Vercel: the browser only talks to this backend, which holds the key.
+
+```
+GET  {NEXT_PUBLIC_API_URL}/api/agents/management          → what the management team may do right now
+POST {NEXT_PUBLIC_API_URL}/api/agents/rooms/:id/manage    → one turn: brief + instructions + starts
+POST {NEXT_PUBLIC_API_URL}/api/agents/rooms/:id/dispatch   → manager speaks first, then Script → Image → Voice → Showrunner
+```
+
+| Backend answer | Page shows |
+| --- | --- |
+| No key configured | `autonomy` chip, `Model: not configured`, and the exact reason from the API |
+| Key set, model answered | the model id + host of the hosted endpoint |
+| Key set, model unreachable | the same host and the real failure reason — never a fake ONLINE |
+| `MANAGER_AUTONOMY=off` | chip reads `may talk, may not act on runtimes`; a refused start is listed with its reason |
+| `startable[].ok === false` | `start <target>: refused` with the tooltip explaining why (a slot with no start path, or an agent whose own `KAGGLE_KERNEL_REF_<SLOT>` is unset) |
+
+The channel list on the page is the real `agent_messages` rows — instructions the management team sent to
+the agents appear there as `instruction`, exactly as they were stored.
+
 ## Runner — `/runner` (one button per AI)
 
 `/runner` renders one run button per entry in `MODEL_CATALOG` (`packages/shared/src/providers/models.ts`).
@@ -45,9 +68,9 @@ GET  {NEXT_PUBLIC_API_URL}/api/runtime/history?limit=40
 | Entry | worker_type | runtime | provider | Button |
 | --- | --- | --- | --- | --- |
 | Script AI · Qwen3 4B | `script` | `kaggle` | `kaggle` | enabled — re-pushes `KAGGLE_KERNEL_REF` as a new version |
-| Image AI · Qwen3 4B | `image` | `kaggle` | `kaggle` | disabled — its notebook is started by hand in Kaggle; Run Now answers `409 not_autostartable` |
-| Voice AI · Qwen3 4B | `voice` | `kaggle` | `kaggle` | disabled — same rule as Image |
-| Showrunner · Qwen3 4B | `overseer` | `kaggle` | `kaggle` | disabled — same rule as Image |
+| Image AI · Qwen3 4B | `image` | `kaggle` | `kaggle` | enabled — re-pushes `KAGGLE_KERNEL_REF_IMAGE`; `409` naming that variable while it is unset |
+| Voice AI · Qwen3 4B | `voice` | `kaggle` | `kaggle` | enabled — re-pushes `KAGGLE_KERNEL_REF_VOICE` |
+| Showrunner · Qwen3 4B | `overseer` | `kaggle` | `kaggle` | enabled — re-pushes `KAGGLE_KERNEL_REF_OVERSEER` |
 | Video Engine · FFmpeg | `video` | `local` | `ffmpeg` | disabled — not deployed yet |
 | YouTube Publisher | `youtube` | `api` | `youtube-api` | disabled — YouTube OAuth is not configured |
 
@@ -72,5 +95,7 @@ from the persisted `runtime_startup_history` row for that `worker_type`+`runtime
 predates it) the Runner says `SWITCH / HEALTH UNKNOWN` and keeps the buttons working, because the
 orchestrator — not the browser — enforces the switches.
 
-Never place `KAGGLE_API_TOKEN`, `KAGGLE_KERNEL_REF`, `SUPABASE_SERVICE_ROLE_KEY` or any other secret in
-Vercel. The notebook the Kaggle button runs is chosen by `KAGGLE_KERNEL_REF` on **Render**.
+Never place `KAGGLE_API_TOKEN`, `KAGGLE_KERNEL_REF`, `KAGGLE_KERNEL_REF_<SLOT>`, `SUPABASE_SERVICE_ROLE_KEY`
+or any other secret in Vercel. Each Kaggle button runs ITS OWN notebook, chosen on **Render** by
+`KAGGLE_KERNEL_REF` (Script AI) or `KAGGLE_KERNEL_REF_<SLOT>` (Image / Voice / Showrunner). A missing
+per-slot ref is refused by name, never replaced with another agent's notebook.
