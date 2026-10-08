@@ -22,6 +22,7 @@ import {
   agentLabel,
   buildNvidiaRequestBody,
   decideRoute,
+  NVIDIA_DEFAULT_MODEL,
   isAllowedNvidiaEndpoint,
   makeHealth,
   managerConfig,
@@ -29,6 +30,7 @@ import {
   nvidiaModelEntry,
   nvidiaModelForSlot,
   nvidiaRateLimitPerMinute,
+  nvidiaRetiredModel,
   routingModeFor,
   workerDisplayHealth,
   type AgentKind,
@@ -75,7 +77,25 @@ export type AgentBackendStatus = {
 
 export type AgentMessage = { role: "system" | "user" | "assistant"; content: string };
 
-export type AgentCallFailureCode = "UNREACHABLE" | "TIMEOUT" | "HTTP_ERROR" | "EMPTY_RESPONSE" | "RATE_LIMITED";
+export type AgentCallFailureCode =
+  | "UNREACHABLE"
+  | "TIMEOUT"
+  | "HTTP_ERROR"
+  | "EMPTY_RESPONSE"
+  | "RATE_LIMITED"
+  /**
+   * The provider has end-of-lifed the configured model id (`410 Gone` is how NIM reports it). Unlike a
+   * 429 or a 5xx this is a PERMANENT verdict about one model id, so it is reported as its own code with
+   * the operator's re-pin instruction — never retried as if it were a bad afternoon, and never
+   * silently swapped for a different model the operator did not choose.
+   */
+  | "MODEL_RETIRED"
+  /**
+   * The id is still listed by the provider but this ACCOUNT cannot call it (NIM answers `404 Function …
+   * not found for account`). Also permanent — retrying cannot grant entitlement — but a different fact
+   * from a retirement, so it says so instead of borrowing that word.
+   */
+  | "MODEL_UNAVAILABLE";
 
 export type AgentChatFailure = {
   ok: false;
@@ -293,15 +313,21 @@ export async function resolveAgentBackendFor(
 
   if (decision.provider === "nvidia") {
     const backend = nvidiaBackend(slot);
+    // A retired pin is reported unavailable here rather than as "routed, awaiting a probe": there is
+    // nothing to probe. The status text names the id and the re-pin, so /models shows the real problem
+    // instead of a green route that cannot answer.
+    const retired = nvidiaRetiredModel(backend.model);
     return {
       backend,
       status: {
-        available: true,
+        available: !retired,
         kind: backend.kind,
         provider: backend.provider,
         model: backend.model,
         endpointHost: backend.endpointHost,
-        detail: `${decision.reason} A real completion decides whether it is ONLINE (see the model switches page).`,
+        detail: retired
+          ? `${decision.reason} ${retiredModelError(backend.model, retired)}.`
+          : `${decision.reason} A real completion decides whether it is ONLINE (see the model switches page).`,
         candidates,
       },
     };
@@ -396,6 +422,39 @@ export function resolveManagerBackend(): { backend: AgentBackend | null; status:
       candidates,
     },
   };
+}
+
+/**
+ * The refusal for a model id NVIDIA has retired, phrased as the one thing the operator has to do.
+ * A retired id is a permanent verdict, so there is no retry advice here — only a re-pin.
+ */
+function retiredModelError(model: string, retired: { retiredOn: string | null; successor: string }): string {
+  const when = retired.retiredOn ? ` (end of life ${retired.retiredOn})` : "";
+  return `NVIDIA model "${model}" is retired${when} — pin a live id instead, e.g. NVIDIA_CHAT_MODEL=${retired.successor} (or NVIDIA_MODEL_<SLOT> for one agent) and redeploy`;
+}
+
+/**
+ * A retired model is different from a broken one, and the status code says so: `410 Gone` is how an
+ * OpenAI-compatible host reports an id it has permanently removed, and NIM also answers `404` for an
+ * id this account cannot call at all. Neither can be fixed by retrying, so neither is allowed to look
+ * like a transient `HTTP_ERROR`.
+ */
+function permanentVerdict(
+  status: number,
+  backend: AgentBackend
+): { code: AgentCallFailureCode; reason: string } | null {
+  if (status === 410) {
+    return { code: "MODEL_RETIRED", reason: "the provider has retired it for good (HTTP 410 Gone)" };
+  }
+  // Observed for real on 2026-10-08: ids that are present in `GET /v1/models` still answer this 404
+  // for the account. Listed is not callable, and no amount of retrying changes that.
+  if (status === 404 && backend.kind === "hosted_nvidia") {
+    return {
+      code: "MODEL_UNAVAILABLE",
+      reason: "NIM does not serve it for this account (HTTP 404) — being listed does not mean this key can call it",
+    };
+  }
+  return null;
 }
 
 /**
@@ -589,8 +648,9 @@ export async function callAgent(
     //  1. the key must exist (server-only; it becomes an Authorization header and nothing else);
     //  2. the endpoint must be an allowlisted NIM host, so a mis-set NVIDIA_BASE_URL cannot exfiltrate
     //     that key to somebody else's server;
-    //  3. the model id must be in the vetted catalog, so a typo/stale value is refused, not forwarded;
-    //  4. the free tier is rate-limited locally so a stuck loop gets an honest, immediate refusal.
+    //  3. a retired id is refused before anything else can happen, because it can never succeed;
+    //  4. the model id must be in the vetted catalog, so a typo/stale value is refused, not forwarded;
+    //  5. the free tier is rate-limited locally so a stuck loop gets an honest, immediate refusal.
     const cfg = nvidiaConfig();
     const key = cfg.apiKey;
     if (!key) {
@@ -604,6 +664,13 @@ export async function callAgent(
         latencyMs: 0,
         backend,
       };
+    }
+    // Checked BEFORE the catalog lookup: a retired id is deliberately out of the catalog, and its own
+    // message (which id, when it died, what to pin instead) is more useful than "not in the vetted
+    // catalog". Nothing is sent upstream and no rate-limit token is spent on a call that cannot work.
+    const retired = nvidiaRetiredModel(backend.model);
+    if (retired) {
+      return { ok: false, code: "MODEL_RETIRED", error: retiredModelError(backend.model, retired), latencyMs: 0, backend };
     }
     const entry = nvidiaModelEntry(backend.model);
     if (!entry) {
@@ -669,6 +736,23 @@ export async function callAgent(
 
   const text = await res.text().catch(() => "");
   if (!res.ok) {
+    const verdict = permanentVerdict(res.status, backend);
+    if (verdict) {
+      const known = nvidiaRetiredModel(backend.model);
+      const fix = known
+        ? retiredModelError(backend.model, known)
+        : `pin a vetted id that answers instead, e.g. NVIDIA_CHAT_MODEL=${NVIDIA_DEFAULT_MODEL} (or NVIDIA_MODEL_<SLOT> for one agent) and redeploy`;
+      return {
+        ok: false,
+        code: verdict.code,
+        error: `model "${backend.model}" ${verdict.reason}. ${fix}${
+          text ? ` · upstream: ${text.slice(0, 200)}` : ""
+        }`,
+        httpStatus: res.status,
+        latencyMs: Date.now() - started,
+        backend,
+      };
+    }
     return {
       ok: false,
       code: "HTTP_ERROR",

@@ -916,7 +916,9 @@ conversation."
 
 1. **NVIDIA NIM (`build.nvidia.com`) as a hosted backup for every slot.** `NVIDIA_API_KEY` (alias
    `NVIDIA_NIM_API_KEY`) + `NVIDIA_BASE_URL` (default `https://integrate.api.nvidia.com/v1`) +
-   `NVIDIA_CHAT_MODEL` (default `meta/llama-3.3-70b-instruct`) + optional `NVIDIA_MODEL_<SLOT>`,
+   `NVIDIA_CHAT_MODEL` (default `meta/llama-3.3-70b-instruct` **at the time — superseded**: that id was
+   end-of-lifed by NVIDIA on 2026-08-26; the default is now `nvidia/nemotron-3-super-120b-a12b`, see
+   `handoffs/HANDOFF-2026-10-08-nvidia-model-repin.md`) + optional `NVIDIA_MODEL_<SLOT>`,
    `NVIDIA_THINKING`, `NVIDIA_RATE_LIMIT_PER_MIN`. It is a new backend kind `hosted_nvidia`
    (`apps/api/src/lib/agentRuntime.ts`), so the same call path serves Script AI, Image AI, Voice AI, the
    Showrunner and the Management Team.
@@ -972,8 +974,10 @@ conversation."
 
 1. ~~Run `supabase/migrations/009_provider_routing.sql`.~~ Already applied (see above).
 2. On Render set `NVIDIA_API_KEY` (build.nvidia.com → Get API Key, `nvapi-…`). Optionally
-   `NVIDIA_CHAT_MODEL=qwen/qwen3-next-80b-a3b-instruct` for visible thinking, or per-slot
-   `NVIDIA_MODEL_<SLOT>`.
+   `NVIDIA_CHAT_MODEL=<a catalog id>` for a specific lane, or per-slot `NVIDIA_MODEL_<SLOT>`. The ids
+   named here originally (`qwen/qwen3-next-80b-a3b-instruct` and the llama defaults) were all confirmed
+   gone on 2026-10-08 — use the five live-verified ids in `docs/API_ENV.md`; every catalog entry now
+   documents its thinking switch, so `NVIDIA_THINKING` needs no per-model tuning.
 3. Open `/models` → pick a routing mode. `NVIDIA for everything` needs no Kaggle runtime at all; `Auto`
    keeps the project's own models first.
 

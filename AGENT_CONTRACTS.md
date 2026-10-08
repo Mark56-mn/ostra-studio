@@ -197,11 +197,27 @@ instead of — or as a backup to — the project's own runtimes.
   4. `response_format: json_object` is never forced on a NIM call, because JSON mode suppresses a reasoning
      model's thinking channel and not every NIM model implements it (the envelope parser accepts prose);
   5. a local sliding-window rate limit (`apps/api/src/lib/rateLimit.ts`) protects the free tier and answers
-     `429 RATE_LIMITED` with a real `Retry-After` instead of burning the account silently.
+     `429 RATE_LIMITED` with a real `Retry-After` instead of burning the account silently;
+  6. a **retired** id is a permanent verdict, not a bad afternoon (`MODEL_RETIRED`): it is refused before
+     any request is sent (so it spends no call and no rate-limit token), and an upstream `410 Gone` — how
+     NIM reports an end-of-lifed model — is reported as its own code with the id, the EOL date and the
+     successor to pin, never as a retryable `HTTP_ERROR`. A NIM `404` (`Function … not found for account`:
+     the id is listed but this key cannot call it) is `MODEL_UNAVAILABLE` instead, because it is a
+     different fact. `NVIDIA_RETIRED_MODELS` records what died and what replaced it
+     (`meta/llama-3.3-70b-instruct`, the original default, died 2026-08-26).
 - **Honesty.** Presence of `NVIDIA_API_KEY` is never reported as ONLINE: a real completion is probed
   (`probeHostedModel`, cached 60s) and the result is reported verbatim. When the mode is `nvidia` and no key
   exists, every surface refuses by naming `NVIDIA_API_KEY`. Every call is attributed to the model that
-  actually answered (`hosted_nvidia` / `hosted_fallback` / `hosted_manager` / `project_worker`).
+  actually answered (`hosted_nvidia` / `hosted_fallback` / `hosted_manager` / `project_worker`). A slot
+  pinned to a retired id is reported `available: false` with the re-pin in its status text, so `/models`
+  shows the real problem instead of a green route that cannot answer.
+- **Pins are evidence, not memory.** On 2026-10-08 every catalog entry was verified **callable** on the
+  operator's key with a real completion, and each `note` carries what that probe measured (latency, and
+  that `enable_thinking` is accepted) — because being listed in `GET /v1/models` does NOT mean a key can
+  call a model: seven listed ids answered `404 Function … not found for account` that day. A listed-but-
+  uncallable id is `MODEL_UNAVAILABLE`, never silently treated as working. The default model is imported
+  from the catalog module rather than restated in `env.ts` or in tests — the duplicated string is how a
+  retired id became the default in the first place.
 - **Audited.** Each change writes `events.type = 'routing.changed'` with the mode/slot and actor — no secrets.
 
 ## AI Studio production channel (2026-09-30 — shipped)

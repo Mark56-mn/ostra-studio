@@ -6,6 +6,7 @@
 
 import assert from "node:assert";
 import { afterEach, describe, it } from "node:test";
+import { NVIDIA_DEFAULT_MODEL, NVIDIA_RETIRED_MODELS } from "@ostra/shared";
 import { callAgent, clearHostedProbeCache, nvidiaBackend } from "./agentRuntime";
 import { resetRateLimits } from "./rateLimit";
 
@@ -66,11 +67,11 @@ const CONFIGURED = { ...clear, NVIDIA_API_KEY: "nvapi-secret-key" };
 
 describe("nvidiaBackend", () => {
   it("reads the operator's per-slot model and never leaks the key", async () => {
-    await withEnv({ ...CONFIGURED, NVIDIA_MODEL_IMAGE: "deepseek-ai/deepseek-r1" }, async () => {
+    await withEnv({ ...CONFIGURED, NVIDIA_MODEL_IMAGE: "moonshotai/kimi-k3" }, async () => {
       const b = nvidiaBackend("image");
       assert.equal(b.kind, "hosted_nvidia");
       assert.equal(b.provider, "nvidia");
-      assert.equal(b.model, "deepseek-ai/deepseek-r1");
+      assert.equal(b.model, "moonshotai/kimi-k3");
       assert.equal(b.endpoint, "https://integrate.api.nvidia.com/v1");
       assert.equal(b.endpointHost, "integrate.api.nvidia.com");
       assert.ok(!JSON.stringify(b).includes("nvapi-secret-key"));
@@ -79,7 +80,9 @@ describe("nvidiaBackend", () => {
 
   it("falls back to the shared default model for a slot with no override", async () => {
     await withEnv(CONFIGURED, async () => {
-      assert.equal(nvidiaBackend("voice").model, "meta/llama-3.3-70b-instruct");
+      // Imported, never restated: this test went red twice for reasons that had nothing to do with the
+      // code, because the default model id was spelled out here by hand.
+      assert.equal(nvidiaBackend("voice").model, NVIDIA_DEFAULT_MODEL);
     });
   });
 });
@@ -96,14 +99,16 @@ describe("callAgent against the NVIDIA backup", () => {
     const headers = call.init.headers as Record<string, string>;
     assert.equal(headers["Authorization"], "Bearer nvapi-secret-key");
     const body = JSON.parse(String(call.init.body)) as Record<string, unknown>;
-    assert.equal(body.model, "meta/llama-3.3-70b-instruct");
+    assert.equal(body.model, NVIDIA_DEFAULT_MODEL);
     assert.equal(body.response_format, undefined, "forcing JSON mode would suppress a reasoning trace");
-    assert.equal(body.chat_template_kwargs, undefined, "this model documents no thinking switch");
+    // The shipped default is a Nemotron 3 lane, which documents `enable_thinking`.
+    assert.deepEqual(body.chat_template_kwargs, { enable_thinking: true });
+    assert.equal(body.max_tokens, 2048, "thinking and the answer share the token budget");
   });
 
   it("requests reasoning with the model's OWN switch and leaves room for it", async () => {
     const calls = stubFetch(() => jsonResponse({ choices: [{ message: { content: "answer", reasoning_content: "why" } }] }));
-    await withEnv({ ...CONFIGURED, NVIDIA_MODEL_SCRIPT: "qwen/qwen3-next-80b-a3b-instruct" }, async () => {
+    await withEnv({ ...CONFIGURED, NVIDIA_MODEL_SCRIPT: "nvidia/nemotron-3.5-lightning-30b-a3b" }, async () => {
       const res = await callAgent(nvidiaBackend("script"), [{ role: "user", content: "hi" }], { maxTokens: 300 });
       assert.equal(res.ok, true);
       if (res.ok) assert.equal(res.reasoning, "why");
@@ -115,7 +120,7 @@ describe("callAgent against the NVIDIA backup", () => {
 
   it("does not ask for thinking when the operator turned it off", async () => {
     const calls = stubFetch(() => jsonResponse(ok));
-    await withEnv({ ...CONFIGURED, NVIDIA_MODEL_SCRIPT: "qwen/qwen3-next-80b-a3b-instruct", NVIDIA_THINKING: "off" }, async () => {
+    await withEnv({ ...CONFIGURED, NVIDIA_MODEL_SCRIPT: "nvidia/nemotron-3.5-lightning-30b-a3b", NVIDIA_THINKING: "off" }, async () => {
       await callAgent(nvidiaBackend("script"), [{ role: "user", content: "hi" }]);
     });
     const body = JSON.parse(String(calls.calls[0]!.init.body)) as Record<string, unknown>;
@@ -182,6 +187,77 @@ describe("callAgent against the NVIDIA backup", () => {
         assert.equal(res.code, "HTTP_ERROR");
         assert.match(res.error, /401/);
       }
+    });
+  });
+
+  // The production incident this guard exists for: NVIDIA end-of-lifed the value in NVIDIA_CHAT_MODEL
+  // and answered 410 Gone. A 410 is a permanent verdict about one model id, so it must not be reported
+  // as a retryable HTTP_ERROR, and the message must carry the re-pin, not just the status code.
+  it("turns a 410 Gone into a named, permanent verdict with the re-pin", async () => {
+    stubFetch(() =>
+      new Response('{"title":"Gone","detail":"The model has reached its end of life."}', { status: 410 })
+    );
+    await withEnv({ ...CONFIGURED, NVIDIA_MODEL_SCRIPT: "nvidia/nemotron-3-super-120b-a12b" }, async () => {
+      const res = await callAgent(nvidiaBackend("script"), [{ role: "user", content: "hi" }]);
+      assert.equal(res.ok, false);
+      if (!res.ok) {
+        assert.equal(res.code, "MODEL_RETIRED");
+        assert.equal(res.httpStatus, 410);
+        assert.match(res.error, /nvidia\/nemotron-3-super-120b-a12b/);
+        assert.match(res.error, /retired it for good/);
+        assert.match(res.error, /pin a vetted id that answers/);
+        assert.equal(res.retryAfterSec, undefined, "retiring is permanent — there is no retry to advise");
+      }
+    });
+  });
+
+  // Observed on the live account 2026-10-08: seven ids that ARE listed in GET /v1/models still answer
+  // this 404 for the key. It is permanent for this pin, but it is not a retirement, so it must not
+  // borrow that word.
+  it("reports a NIM 404 as MODEL_UNAVAILABLE, not as a retirement", async () => {
+    stubFetch(() =>
+      new Response('{"status":404,"title":"Not Found","detail":"Function x: Not found for account y"}', { status: 404 })
+    );
+    await withEnv({ ...CONFIGURED, NVIDIA_MODEL_SCRIPT: "nvidia/nemotron-3-super-120b-a12b" }, async () => {
+      const res = await callAgent(nvidiaBackend("script"), [{ role: "user", content: "hi" }]);
+      assert.equal(res.ok, false);
+      if (!res.ok) {
+        assert.equal(res.code, "MODEL_UNAVAILABLE");
+        assert.equal(res.httpStatus, 404);
+        assert.match(res.error, /does not serve it for this account/);
+        assert.match(res.error, new RegExp(NVIDIA_DEFAULT_MODEL.replace(/[/.]/g, "\\$&")));
+      }
+    });
+  });
+
+  it("refuses a retired pin locally, naming the successor, without touching the network", async () => {
+    const calls = stubFetch(() => jsonResponse(ok));
+    const dead = NVIDIA_RETIRED_MODELS[0]!;
+    await withEnv({ ...CONFIGURED, NVIDIA_CHAT_MODEL: dead.id }, async () => {
+      const res = await callAgent(nvidiaBackend("script"), [{ role: "user", content: "hi" }]);
+      assert.equal(res.ok, false);
+      if (!res.ok) {
+        assert.equal(res.code, "MODEL_RETIRED");
+        assert.match(res.error, new RegExp(dead.id.replace(/[/.]/g, "\\$&")));
+        assert.match(res.error, new RegExp(dead.successor.replace(/[/.]/g, "\\$&")));
+        assert.match(res.error, /NVIDIA_CHAT_MODEL=/);
+      }
+    });
+    assert.equal(calls.calls.length, 0, "a retired id can never succeed, so it must not spend a call");
+  });
+
+  it("does not spend a rate-limit token on a retired pin", async () => {
+    stubFetch(() => jsonResponse(ok));
+    await withEnv({ ...CONFIGURED, NVIDIA_RATE_LIMIT_PER_MIN: "1", NVIDIA_MODEL_SCRIPT: NVIDIA_RETIRED_MODELS[0]!.id }, async () => {
+      const refused = await callAgent(nvidiaBackend("script"), [{ role: "user", content: "one" }]);
+      assert.equal(refused.ok, false);
+      if (!refused.ok) assert.equal(refused.code, "MODEL_RETIRED");
+      // The refusal must not have consumed the single allowed call: a live pin still works afterwards.
+      const live = await callAgent(
+        { ...nvidiaBackend("script"), model: "nvidia/nemotron-3-super-120b-a12b" },
+        [{ role: "user", content: "two" }]
+      );
+      assert.equal(live.ok, true);
     });
   });
 });

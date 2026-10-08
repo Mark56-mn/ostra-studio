@@ -84,7 +84,11 @@ COLAB_RUNTIME_ID=...                      # optional runtimeId for POST /v1beta/
 # The key is server-only (it never reaches the browser) and is only ever sent to an allowlisted NVIDIA host.
 NVIDIA_API_KEY=                            # build.nvidia.com → Get API Key (keys look like nvapi-...)
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1   # default; another host is refused, not used
-NVIDIA_CHAT_MODEL=meta/llama-3.3-70b-instruct         # default; must be in the vetted catalog
+NVIDIA_CHAT_MODEL=nvidia/nemotron-3-super-120b-a12b   # default; must be in the vetted catalog
+# Catalog entries were verified CALLABLE on the live key 2026-10-08 (see docs/API_ENV.md for the table).
+# A retired id (meta/llama-3.3-70b-instruct, EOL 2026-08-26) fails as MODEL_RETIRED and names its
+# successor — refused before any request is sent, so it can never silently degrade a room. A NIM 404
+# (listed, but not callable by this key) is MODEL_UNAVAILABLE. Neither is retried as a transient.
 NVIDIA_MODEL_<SLOT>=                       # optional per-slot override (SCRIPT/IMAGE/VOICE/OVERSEER/MANAGER)
 NVIDIA_THINKING=true                       # request reasoning where the model documents a switch
 NVIDIA_RATE_LIMIT_PER_MIN=20               # local free-tier guard (1..600) → 429 RATE_LIMITED

@@ -99,19 +99,41 @@ key exists. A key alone never makes it ONLINE.
 # an Authorization header and is never returned to a client.
 NVIDIA_API_KEY=
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1   # default; only an allowlisted NVIDIA host is accepted
-NVIDIA_CHAT_MODEL=meta/llama-3.3-70b-instruct          # default; must be in the vetted catalog
+NVIDIA_CHAT_MODEL=nvidia/nemotron-3-super-120b-a12b    # default; must be in the vetted catalog
 NVIDIA_MODEL_SCRIPT=                                   # optional per-slot override (…_IMAGE/_VOICE/_OVERSEER/_MANAGER)
 NVIDIA_THINKING=true                                   # request reasoning where the model documents a switch
 NVIDIA_RATE_LIMIT_PER_MIN=20                           # local free-tier guard (1..600)
 ```
 
-Model ids are restricted to the vetted catalog in `packages/shared/src/providers/nvidia.ts`
-(`meta/llama-3.3-70b-instruct`, `meta/llama-3.1-8b-instruct`, `qwen/qwen3-next-80b-a3b-instruct`,
-`deepseek-ai/deepseek-r1`, `nvidia/nemotron-3-super-120b-a12b`, `qwen/qwen2.5-coder-32b-instruct`). An id
-outside it is refused with the allowed list rather than forwarded, and the key is only ever sent to
-`integrate.api.nvidia.com` / `api.nvidia.com` even if `NVIDIA_BASE_URL` says something else. Switching the
-routing mode to `nvidia` does **not** make it ONLINE: a real completion probe (cached 60s) decides, and
-the result is reported verbatim.
+Model ids are restricted to the vetted catalog in `packages/shared/src/providers/nvidia.ts`.
+Every entry there was verified **callable** on this key on 2026-10-08 with a real completion (a listed
+model is not necessarily a model your key can call — see below):
+
+| id | verified 2026-10-08 |
+| --- | --- |
+| `nvidia/nemotron-3-super-120b-a12b` | **the default**; ~1.1s, answers with `enable_thinking` and returns a reasoning channel |
+| `nvidia/nemotron-3.5-lightning-30b-a3b` | ~3.4s, same switch |
+| `nvidia/nemotron-3-ultra-550b-a55b` | ~15s; one probe that day hit `503 Service temporarily overloaded` |
+| `openai/gpt-oss-20b` | fastest lane, ~0.9s; returns reasoning without any template kwarg |
+| `moonshotai/kimi-k3` | ~29s — callable but the slowest measured |
+
+An id outside the catalog is refused with the allowed list rather than forwarded, and the key is only ever
+sent to `integrate.api.nvidia.com` / `api.nvidia.com` even if `NVIDIA_BASE_URL` says something else.
+Switching the routing mode to `nvidia` does **not** make it ONLINE: a real completion probe (cached 60s)
+decides, and the result is reported verbatim.
+
+**Retired / unavailable ids are permanent verdicts, not bad afternoons.**
+- `meta/llama-3.3-70b-instruct` (this project's original default) was end-of-lifed on `2026-08-26`;
+  NVIDIA answers `410 Gone` for it forever. It, plus `meta/llama-3.1-8b-instruct`,
+  `qwen/qwen3-next-80b-a3b-instruct`, `deepseek-ai/deepseek-r1` and `qwen/qwen2.5-coder-32b-instruct`
+  (all confirmed absent from the live `GET /v1/models` on 2026-10-08), live in `NVIDIA_RETIRED_MODELS`
+  with a successor each — so a stale pin fails as `MODEL_RETIRED`, refused **before** any request is sent
+  (no call, no rate-limit token), naming the id, its EOL date and the successor to pin.
+- A NIM `404` (`Function … not found for account`) means the id is listed but **this key cannot call it**;
+  that is `MODEL_UNAVAILABLE`, a different fact from a retirement and reported as such.
+- Neither is ever reported as a retryable `HTTP_ERROR`, and neither is silently swapped for a model the
+  operator did not choose. Re-pinning is one env var: `NVIDIA_CHAT_MODEL` (all slots) or
+  `NVIDIA_MODEL_<SLOT>` (one agent).
 
 ### Model switches — `GET /api/models` / `PATCH /api/models/:key`
 

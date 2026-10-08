@@ -1,5 +1,6 @@
 // Centralizes env access. Secrets are server-only; NEXT_PUBLIC_* is safe for the browser.
 // Rationale: prevents accidental frontend leakage and makes adapter availability checkable.
+import { NVIDIA_DEFAULT_BASE_URL, NVIDIA_DEFAULT_MODEL } from "../providers/nvidia";
 //
 // NOTE (production integration): the runtime supervisor does NOT use *_SCRIPT_URL / *_IMAGE_URL /
 // *_VOICE_URL endpoints any more. Providers are driven through the Kaggle/Colab APIs and a worker
@@ -198,8 +199,9 @@ export type NvidiaConfig = {
   reason?: string;
 };
 
-const NVIDIA_DEFAULT_MODEL_NAME = "meta/llama-3.3-70b-instruct";
-const NVIDIA_DEFAULT_BASE = "https://integrate.api.nvidia.com/v1";
+// Both NVIDIA defaults live in providers/nvidia.ts (the catalog module) so the model that is shipped
+// as the default and the model that is allowed to be dispatched cannot drift apart. The previous
+// duplication is exactly how a retired id became the default in the first place.
 
 /** Clamp the per-minute hosted-call budget so a typo cannot disable the limiter or open it wide. */
 export function nvidiaRateLimitPerMinute(): number {
@@ -215,9 +217,8 @@ function nvidiaThinkingEnabled(): boolean {
 
 export function nvidiaConfig(): NvidiaConfig {
   const apiKey = clean(process.env.NVIDIA_API_KEY) ?? clean(process.env.NVIDIA_NIM_API_KEY);
-  const baseUrl = clean(process.env.NVIDIA_BASE_URL) ?? NVIDIA_DEFAULT_BASE;
-  const model =
-    clean(process.env.NVIDIA_CHAT_MODEL) ?? NVIDIA_DEFAULT_MODEL_NAME;
+  const baseUrl = clean(process.env.NVIDIA_BASE_URL) ?? NVIDIA_DEFAULT_BASE_URL;
+  const model = clean(process.env.NVIDIA_CHAT_MODEL) ?? NVIDIA_DEFAULT_MODEL;
   const host = (() => {
     try {
       return new URL(baseUrl).host;
