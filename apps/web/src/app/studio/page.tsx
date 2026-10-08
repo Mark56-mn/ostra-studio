@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TopNav } from "@/components/TopNav";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
+import { ThinkingBlock } from "@/components/ThinkingBlock";
 import { formatClock } from "@/lib/chat";
 import {
   agentLabel,
@@ -363,6 +364,7 @@ export default function StudioPage() {
                 <li>• Your brief is saved first, then each agent runs once, in order: Script → Image → Voice → Showrunner.</li>
                 <li>• Each agent reads the whole channel and the real store, and can request additive store changes only.</li>
                 <li>• An offline agent is skipped and reported; nothing is written on its behalf.</li>
+                <li>• Each message carries the agent&apos;s own thinking in a THINKING block above it, so you can see why it decided what it did.</li>
                 <li>• Press run again to continue the conversation from where it stopped.</li>
               </ul>
             </Card>
@@ -435,18 +437,13 @@ export default function StudioPage() {
   );
 }
 
-function reasonWords(reasoning: unknown): number {
-  const text = typeof reasoning === "string" ? reasoning.trim() : "";
-  return text ? text.split(/\s+/).length : 0;
-}
-
 function ChannelRow({ message }: { message: ChannelMessage }) {
   const from = message.from_agent;
   const isDirector = from === "director";
   const toDirector = message.to_agent === "director";
   const status = statusLabel(message.status);
-  const reasoning = message.payload?.["reasoning"];
-  const words = reasonWords(reasoning);
+  const rawReasoning = message.payload?.["reasoning"];
+  const reasoning = typeof rawReasoning === "string" ? rawReasoning : null;
 
   return (
     <div className="rounded-2xl border border-white/[0.07] bg-[#0F1425] px-4 py-3">
@@ -477,20 +474,9 @@ function ChannelRow({ message }: { message: ChannelMessage }) {
         {toDirector && !isDirector && <span className="label-mono text-[#6B7594]">TO YOU</span>}
       </div>
 
-      {words > 0 && (
-        <details className="group mb-2 rounded-lg border border-white/[0.06] bg-[#070A14]/60">
-          <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-[11px] text-[#6B7594] transition hover:text-[#9AA3C0] [&::-webkit-details-marker]:hidden">
-            <span aria-hidden className="text-[9px] transition-transform group-open:rotate-90">
-              ▶
-            </span>
-            <span className="label-mono">THINKING</span>
-            <span className="text-[#4C5570]">· {words} words — reasoning, not the message</span>
-          </summary>
-          <div className="max-h-64 overflow-y-auto whitespace-pre-wrap border-t border-white/[0.06] px-2.5 py-2 font-mono text-[11px] leading-5 text-[#8B94B4]">
-            {String(reasoning)}
-          </div>
-        </details>
-      )}
+      {/* What the agent was actually thinking when it wrote this message — the trace the model
+          produced, shown separately so it can never be read as the message itself. */}
+      <ThinkingBlock reasoning={reasoning} caption="reasoning, not the message" />
 
       <div className="whitespace-pre-wrap text-[13px] leading-6 text-[#E8ECF8]">{message.content}</div>
 
@@ -505,7 +491,13 @@ function ChannelRow({ message }: { message: ChannelMessage }) {
         <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-[#6B7594]">
           <span className="rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono">
             {message.backend.model ?? message.backend.provider}
-            {message.backend.kind === "project_worker" ? " · project runtime" : message.backend.kind === "hosted_fallback" ? " · hosted fallback" : ""}
+            {message.backend.kind === "project_worker"
+              ? " · project runtime"
+              : message.backend.kind === "hosted_nvidia"
+                ? " · NVIDIA backup"
+                : message.backend.kind === "hosted_fallback"
+                  ? " · hosted fallback"
+                  : ""}
           </span>
           {message.backend.latencyMs != null && <span>{Math.round(message.backend.latencyMs / 100) / 10}s</span>}
           {message.backend.parse === "text_fallback" && <span>prose reply (no JSON envelope)</span>}

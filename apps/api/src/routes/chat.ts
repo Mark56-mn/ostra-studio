@@ -14,6 +14,9 @@
 //  - When no backend can answer, the response is 503 NO_AGENT_BACKEND with the real reason and NO
 //    assistant row is written. When the call fails, it is 502 with the real transport/HTTP error.
 //    There is no placeholder, no canned reply and no fabricated success.
+//  - WHICH model answers is the operator's persisted routing decision (own / auto / nvidia, see
+//    apps/api/src/lib/routing.ts). The hosted NVIDIA backup is rate-limited for the free tier and
+//    answers 429 with a real Retry-After rather than silently burning the account.
 //  - Store writes happen only through `applyStoreActions` and only for the actions the model
 //    actually returned; the response carries the per-action result.
 
@@ -185,6 +188,18 @@ export async function postMessage(req: Request, res: Response) {
 
   const call = await callAgent(backend, messages);
   if (!call.ok) {
+    if (call.code === "RATE_LIMITED") {
+      const retryAfterSec = call.retryAfterSec ?? 60;
+      res.setHeader("Retry-After", String(retryAfterSec));
+      return res.status(429).json({
+        error: "RATE_LIMITED",
+        reason: `The Script AI (${backend.provider} · ${backend.model}) ${call.error}`,
+        retry_after_sec: retryAfterSec,
+        user_message: userMessage,
+        backend: publicBackend(backend),
+        agent: status,
+      });
+    }
     return res.status(502).json({
       error: call.code,
       reason: `The Script AI (${backend.provider} · ${backend.model}${backend.endpointHost ? ` · ${backend.endpointHost}` : ""}) ${call.error}`,

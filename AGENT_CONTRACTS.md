@@ -152,21 +152,57 @@ Expose concise operational rationale, decisions, and actions.
 
 Do not expose private hidden chain-of-thought.
 
-### Agent Chat exception (2026-09-30 — explicit director request)
+### Conversation-thinking exception (2026-09-30, widened 2026-10-08 — explicit director request)
 
-The Agent Chat room (`/chat`) shows the Script AI's own thinking in a collapsed **THINKING** block above
-its answer, because the director asked to see the reasoning separately the way a coding agent does. This
+Every conversational surface shows the model's own thinking in a **THINKING** block above the message it
+belongs to, because the director asked to see the reasoning separately the way a coding agent does. This
 is a deliberate, narrow exception to the rule above, and it is bounded:
 
 - the trace is the model's real output — Qwen3's inline thinking tags inside `content`, or a server's
   `reasoning_content`-style field — split off by `splitReasoning` **before** the JSON envelope is parsed
   (`packages/shared/src/agent/protocol.ts`). Ostra never writes, summarises or rewords it, and when the
   model does not think there is no trace at all, so no block renders. Nothing is ever fabricated;
-- it is collapsed by default, so it never displaces the answer or the operational messages;
+- it is **expanded by default** (`apps/web/src/components/ThinkingBlock.tsx`, used by `/chat` and
+  `/studio`), because a trace hidden behind a click is effectively hidden; it stays collapsible for long
+  traces, and the label always says the count of real words and that it is reasoning, not the answer;
 - it is persisted as `chat_messages.reasoning` (migration `006_chat_reasoning.sql`) for the room's audit
-  trail, and is deliberately **not** sent back to the model on later turns, so it cannot compound;
+  trail and as `agent_messages.payload.reasoning` for the production channel, and it is deliberately
+  **not** sent back to the model on later turns, so it cannot compound;
+- the answering model is asked for it: project workers run Qwen3 (whose chat template thinks by default),
+  and a hosted backup only receives a thinking switch the chosen model documents (see below). A model that
+  produces no trace renders no block — a trace is never invented and never fabricated from a summary;
 - everything else keeps the rule: worker/task messages carry concise operational rationale
   (decision / reason / action), not raw chain-of-thought.
+
+## Hosted backup — NVIDIA NIM + provider routing (2026-10-08 — shipped)
+
+The four agents and the Management Team can answer from **NVIDIA NIM** (`build.nvidia.com`, OpenAI-compatible)
+instead of — or as a backup to — the project's own runtimes.
+
+- **One explicit decision, persisted.** `provider_routing` (migration `009_provider_routing.sql`, single row)
+  holds `mode` = `own | auto | nvidia` plus optional per-slot overrides. `auto` (the default) means: the
+  project's own worker answers when it is genuinely ONLINE, otherwise the hosted backup does. `own` refuses
+  hosted models entirely; `nvidia` forces the backup for every slot. Read/written by
+  `apps/api/src/lib/routing.ts` and validated by `validateRoutingPatch` (pure, unit-tested) — an unknown mode
+  or slot is a 400 naming the accepted values, never a silent no-op. A missing table degrades to `auto` and
+  says so.
+- **The switch is `GET|PATCH /api/routing`**, surfaced on `/models` as a three-way mode picker plus a
+  per-agent override table. Each row shows the SAME resolution the room will use
+  (`resolveChannelBackend`), so the page cannot claim a route the agents do not take.
+- **Guard rails, all server-side and unit-tested** (`packages/shared/src/providers/nvidia.ts`):
+  1. the bearer key is only ever sent to an allowlisted NIM host, so a mis-set `NVIDIA_BASE_URL` cannot
+     exfiltrate it;
+  2. only vetted catalog model ids are dispatchable — anything else is refused, not forwarded;
+  3. reasoning uses the model's own documented switch (`enable_thinking`), never a guessed kwarg;
+  4. `response_format: json_object` is never forced on a NIM call, because JSON mode suppresses a reasoning
+     model's thinking channel and not every NIM model implements it (the envelope parser accepts prose);
+  5. a local sliding-window rate limit (`apps/api/src/lib/rateLimit.ts`) protects the free tier and answers
+     `429 RATE_LIMITED` with a real `Retry-After` instead of burning the account silently.
+- **Honesty.** Presence of `NVIDIA_API_KEY` is never reported as ONLINE: a real completion is probed
+  (`probeHostedModel`, cached 60s) and the result is reported verbatim. When the mode is `nvidia` and no key
+  exists, every surface refuses by naming `NVIDIA_API_KEY`. Every call is attributed to the model that
+  actually answered (`hosted_nvidia` / `hosted_fallback` / `hosted_manager` / `project_worker`).
+- **Audited.** Each change writes `events.type = 'routing.changed'` with the mode/slot and actor — no secrets.
 
 ## AI Studio production channel (2026-09-30 — shipped)
 

@@ -31,11 +31,22 @@ export function redactSecrets(obj: Record<string, unknown> | null | undefined): 
   if (!obj || typeof obj !== "object") return obj ?? null;
   const out: Record<string, unknown> = { ...obj };
   for (const k of Object.keys(out)) {
-    // Numbered/named Kaggle tokens (KAGGLE_API_TOKEN_1, _2, _BETTERTRADE, …) are as secret as the plain name.
-    if (SECRET_KEYS.has(k) || SECRET_KEYS.has(k.toLowerCase()) || k.startsWith("KAGGLE_API_TOKEN") || k.endsWith("KAGGLE_API_TOKEN")) out[k] = "[REDACTED]";
+    // Numbered/named Kaggle tokens (KAGGLE_API_TOKEN_1, _2, _BETTERTRADE, …) are as secret as the plain name,
+    // and the hosted NVIDIA key is a secret with exactly the same rules.
+    if (
+      SECRET_KEYS.has(k) ||
+      SECRET_KEYS.has(k.toLowerCase()) ||
+      k.startsWith("KAGGLE_API_TOKEN") ||
+      k.endsWith("KAGGLE_API_TOKEN") ||
+      k.toUpperCase().includes("NVIDIA_API_KEY") ||
+      k.toUpperCase().includes("NVIDIA_NIM_API_KEY")
+    )
+      out[k] = "[REDACTED]";
     // also redact values that look like tokens
     const v = out[k];
     if (typeof v === "string" && v.length > 40 && /(KGAT_|ya29\.|1\/\/|eyJ)/.test(v)) out[k] = "[REDACTED]";
+    // NVIDIA keys are `nvapi-…`; redact by shape too, so a key pasted into an unexpected field is caught.
+    if (typeof v === "string" && /nvapi-/.test(v)) out[k] = "[REDACTED]";
   }
   return out;
 }

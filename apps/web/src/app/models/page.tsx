@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { TopNav } from "@/components/TopNav";
+import { ProviderRouting } from "@/components/ProviderRouting";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { heartbeatAgeLabel, statusLabel, statusTone, type StatusTone } from "@/lib/health";
 import {
@@ -177,7 +178,8 @@ export default function ModelsPage() {
               scheduler runs and <span className="font-mono text-white">Run Now</span> are refused and recorded as{" "}
               <span className="font-mono text-white">skipped_disabled</span>. Switching a model on does{" "}
               <span className="text-white">not</span> make it ONLINE: the health shown here is the same real
-              heartbeat/check state reported everywhere else.
+              heartbeat/check state reported everywhere else. To run every agent on NVIDIA&apos;s free models
+              instead (or as a backup), use the provider routing switch above.
             </p>
           </div>
           <button
@@ -202,6 +204,8 @@ export default function ModelsPage() {
         {notice && (
           <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3 text-[13px] text-emerald-200">{notice}</div>
         )}
+
+        <ProviderRouting />
 
         {counts && (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">

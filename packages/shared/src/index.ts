@@ -7,7 +7,9 @@ export * from "./agent/agents";
 export * from "./providers/contracts";
 export * from "./providers/health";
 export * from "./providers/models";
+export * from "./providers/nvidia";
 export * from "./providers/registry";
+export * from "./providers/routing";
 export * from "./providers/runtimeStarters";
 export { EVT, eventPayload } from "./orchestrator/events";
 export {

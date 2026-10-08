@@ -5,9 +5,12 @@
 //  - The room prefers the project's own Script AI: the `script` worker that is genuinely ONLINE
 //    (fresh heartbeat) in Supabase, reached at the tunnel endpoint it registered. No endpoint is
 //    ever hard-coded.
-//  - If no project worker is online, a hosted OpenAI-compatible fallback is used ONLY when
-//    OPENAI_API_KEY is configured. Nothing is simulated: when there is no usable backend the caller
-//    gets `available: false` plus the real reason, and the UI says so.
+//  - If no project worker is online, a hosted fallback answers. The operator's persisted routing
+//    decision picks which family (see providers/routing.ts): NVIDIA NIM first, then OPENAI_*. Nothing
+//    is simulated: when there is no usable backend the caller gets `available: false` plus the real
+//    reason, and the UI says so.
+//  - Every NVIDIA call goes through the shared guards: allowlisted endpoint, catalog-only model id,
+//    the model's own reasoning switch, and a local rate limit for the free tier's credits.
 //  - Endpoint URLs (and any credential) are never returned to the client — only the host.
 //  - A failed call reports the real transport/HTTP error. There is no fabricated answer.
 //  - The model's thinking is returned alongside its answer (an explicit `reasoning_content`-style
@@ -17,15 +20,25 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   agentLabel,
+  buildNvidiaRequestBody,
+  decideRoute,
+  isAllowedNvidiaEndpoint,
   makeHealth,
   managerConfig,
+  nvidiaConfig,
+  nvidiaModelEntry,
+  nvidiaModelForSlot,
+  nvidiaRateLimitPerMinute,
+  routingModeFor,
   workerDisplayHealth,
   type AgentKind,
   type ProviderHealth,
   type WorkerHealthRow,
 } from "@ostra/shared";
+import { readRouting } from "./routing.js";
+import { takeToken } from "./rateLimit.js";
 
-export type AgentBackendKind = "project_worker" | "hosted_fallback" | "hosted_manager";
+export type AgentBackendKind = "project_worker" | "hosted_nvidia" | "hosted_fallback" | "hosted_manager";
 
 /** A resolved, callable backend. `endpoint` is server-side only. */
 export type AgentBackend = {
@@ -62,7 +75,18 @@ export type AgentBackendStatus = {
 
 export type AgentMessage = { role: "system" | "user" | "assistant"; content: string };
 
-export type AgentCallFailureCode = "UNREACHABLE" | "TIMEOUT" | "HTTP_ERROR" | "EMPTY_RESPONSE";
+export type AgentCallFailureCode = "UNREACHABLE" | "TIMEOUT" | "HTTP_ERROR" | "EMPTY_RESPONSE" | "RATE_LIMITED";
+
+export type AgentChatFailure = {
+  ok: false;
+  code: AgentCallFailureCode;
+  error: string;
+  httpStatus?: number;
+  latencyMs: number;
+  backend: AgentBackend;
+  /** Set only for RATE_LIMITED: the honest number of seconds until the next call is allowed. */
+  retryAfterSec?: number;
+};
 
 export type AgentChatResult =
   | {
@@ -77,13 +101,69 @@ export type AgentChatResult =
       latencyMs: number;
       backend: AgentBackend;
     }
-  | { ok: false; code: AgentCallFailureCode; error: string; httpStatus?: number; latencyMs: number; backend: AgentBackend };
+  | AgentChatFailure;
 
 const DEFAULT_HOSTED_MODEL = "gpt-4o-mini";
 
 /** Hosted fallback is optional; the room works with the project worker alone. */
 export function hostedFallbackConfigured(): boolean {
   return !!process.env.OPENAI_API_KEY?.trim();
+}
+
+/**
+ * The NVIDIA NIM backend for one agent slot. `endpoint` is the allowlisted base URL and `model` is
+ * the slot's configured model id — whether that id is in the vetted catalog is re-checked at call
+ * time, so a stale/typo'd value is refused loudly instead of being sent upstream.
+ */
+export function nvidiaBackend(slot: string): AgentBackend {
+  const cfg = nvidiaConfig();
+  return {
+    kind: "hosted_nvidia",
+    provider: "nvidia",
+    model: nvidiaModelForSlot(slot),
+    endpoint: cfg.baseUrl.replace(/\/+$/, ""),
+    endpointHost: cfg.host,
+    workerId: null,
+  };
+}
+
+/**
+ * Forced-NVIDIA resolution (routing mode `nvidia`): every agent answers from NIM regardless of the
+ * runtime state. `available` comes from a REAL (briefly cached) completion, not from key presence —
+ * presence alone is never health — while the backend is still handed back so a transient probe
+ * failure does not itself block a genuine call.
+ */
+async function resolveNvidiaOnly(agent: AgentKind): Promise<{ backend: AgentBackend | null; status: AgentBackendStatus }> {
+  const label = agentLabel(agent);
+  const cfg = nvidiaConfig();
+  const backend = nvidiaBackend(agent);
+  if (!cfg.configured) {
+    return {
+      backend: null,
+      status: {
+        available: false,
+        kind: null,
+        provider: null,
+        model: null,
+        endpointHost: cfg.host,
+        detail: `${cfg.reason ?? "NVIDIA is not configured"} (routing is set to "nvidia", so nothing else will answer ${label}).`,
+        candidates: [],
+      },
+    };
+  }
+  const health = await probeHostedModel(backend, { timeoutMs: 8000 });
+  return {
+    backend,
+    status: {
+      available: health.status === "ONLINE",
+      kind: "hosted_nvidia",
+      provider: "nvidia",
+      model: backend.model,
+      endpointHost: backend.endpointHost,
+      detail: `${label} is routed to the NVIDIA NIM backup — ${health.status}${health.reason ? `: ${health.reason}` : ""}`,
+      candidates: [],
+    },
+  };
 }
 
 function timeoutMs(): number {
@@ -129,14 +209,17 @@ const WORKER_COLUMNS =
  * `workerTypes` is a PRIORITY list: when two roles can serve the same call (e.g. a dedicated
  * `overseer` notebook, falling back to the `script` worker), the earlier type wins if it is ONLINE.
  * `label` is only used in the human-readable status text ("Script AI is ONLINE …").
+ * `slot` is the routable slot name used to read the operator's routing decision; it defaults to the
+ * first worker type, which is correct for every current caller.
  */
 export async function resolveAgentBackendFor(
   supa: SupabaseClient,
   workerTypes: string | string[],
-  opts: { label?: string } = {}
+  opts: { label?: string; slot?: string } = {}
 ): Promise<{ backend: AgentBackend | null; status: AgentBackendStatus }> {
   const types = Array.isArray(workerTypes) ? workerTypes : [workerTypes];
   const label = opts.label ?? types[0] ?? "agent";
+  const slot = opts.slot ?? types[0] ?? "script";
   const candidates: AgentCandidate[] = [];
   const { data, error } = await supa.from("workers").select(WORKER_COLUMNS).in("type", types);
 
@@ -171,7 +254,20 @@ export async function resolveAgentBackendFor(
 
   // Prefer a live project worker with a reachable endpoint registered.
   const usable = online.find(({ row }) => typeof row.endpoint === "string" && row.endpoint.trim().length > 0);
-  if (usable) {
+
+  // The operator's persisted routing decision. It is read live and defaults to `auto` when it cannot
+  // be read at all, so a missing table can never stop the studio from answering.
+  const { settings } = await readRouting(supa);
+  const mode = routingModeFor(settings, slot);
+  const decision = decideRoute({
+    mode,
+    label,
+    workerOnline: Boolean(usable),
+    nvidiaConfigured: nvidiaConfig().configured,
+    openaiConfigured: hostedFallbackConfigured(),
+  });
+
+  if (decision.provider === "project" && usable) {
     const endpoint = usable.row.endpoint!.trim().replace(/\/+$/, "");
     const backend: AgentBackend = {
       kind: "project_worker",
@@ -195,7 +291,23 @@ export async function resolveAgentBackendFor(
     };
   }
 
-  if (hostedFallbackConfigured()) {
+  if (decision.provider === "nvidia") {
+    const backend = nvidiaBackend(slot);
+    return {
+      backend,
+      status: {
+        available: true,
+        kind: backend.kind,
+        provider: backend.provider,
+        model: backend.model,
+        endpointHost: backend.endpointHost,
+        detail: `${decision.reason} A real completion decides whether it is ONLINE (see the model switches page).`,
+        candidates,
+      },
+    };
+  }
+
+  if (decision.provider === "openai") {
     const backend = hostedBackend();
     return {
       backend,
@@ -205,10 +317,7 @@ export async function resolveAgentBackendFor(
         provider: backend.provider,
         model: backend.model,
         endpointHost: backend.endpointHost,
-        detail:
-          rows.length === 0 && !error
-            ? `No ${label} worker is registered, so the configured hosted fallback model answers.`
-            : `No ${label} worker is ONLINE, so the configured hosted fallback model answers.`,
+        detail: decision.reason,
         candidates,
       },
     };
@@ -227,15 +336,15 @@ export async function resolveAgentBackendFor(
       provider: null,
       model: null,
       endpointHost: null,
-      detail: `${reason}. Add OPENAI_API_KEY on the backend if you want a hosted fallback to answer instead.`,
+      detail: `${decision.reason} ${reason}.`,
       candidates,
     },
   };
 }
 
-/** The Agent Chat room's backend: the project's own Script AI, else the hosted fallback. */
+/** The Agent Chat room's backend: the project's own Script AI, else the routed hosted backup. */
 export function resolveAgentBackend(supa: SupabaseClient) {
-  return resolveAgentBackendFor(supa, "script", { label: "Script AI" });
+  return resolveAgentBackendFor(supa, "script", { label: "Script AI", slot: "script" });
 }
 
 /**
@@ -356,12 +465,16 @@ export async function probeHostedModel(
  * and falls back to the Script AI worker (a real model, just not a dedicated overseer) — the status
  * `detail` always says which one actually answered.
  */
-export function resolveChannelBackend(supa: SupabaseClient, agent: AgentKind) {
+export async function resolveChannelBackend(supa: SupabaseClient, agent: AgentKind) {
+  const { settings } = await readRouting(supa);
+  const mode = routingModeFor(settings, agent);
+  // Forced NVIDIA overrides EVERY slot, including the hosted management team.
+  if (mode === "nvidia") return resolveNvidiaOnly(agent);
   if (agent === "manager") return resolveManagerBackend();
   if (agent === "overseer") {
-    return resolveAgentBackendFor(supa, ["overseer", "script"], { label: "Showrunner" });
+    return resolveAgentBackendFor(supa, ["overseer", "script"], { label: "Showrunner", slot: "overseer" });
   }
-  return resolveAgentBackendFor(supa, agent, { label: agentLabel(agent) });
+  return resolveAgentBackendFor(supa, agent, { label: agentLabel(agent), slot: agent });
 }
 
 function healthSummary(row: WorkerHealthRow): string {
@@ -471,6 +584,56 @@ export async function callAgent(
       stream: false,
       response_format: { type: "json_object" },
     };
+  } else if (backend.kind === "hosted_nvidia") {
+    // Every NVIDIA guard lives here, in one place:
+    //  1. the key must exist (server-only; it becomes an Authorization header and nothing else);
+    //  2. the endpoint must be an allowlisted NIM host, so a mis-set NVIDIA_BASE_URL cannot exfiltrate
+    //     that key to somebody else's server;
+    //  3. the model id must be in the vetted catalog, so a typo/stale value is refused, not forwarded;
+    //  4. the free tier is rate-limited locally so a stuck loop gets an honest, immediate refusal.
+    const cfg = nvidiaConfig();
+    const key = cfg.apiKey;
+    if (!key) {
+      return { ok: false, code: "UNREACHABLE", error: "NVIDIA_API_KEY is not configured on the backend", latencyMs: 0, backend };
+    }
+    if (!isAllowedNvidiaEndpoint(cfg.baseUrl)) {
+      return {
+        ok: false,
+        code: "UNREACHABLE",
+        error: `NVIDIA_BASE_URL host "${cfg.host ?? cfg.baseUrl}" is not an allowlisted NVIDIA endpoint — the key is never sent there`,
+        latencyMs: 0,
+        backend,
+      };
+    }
+    const entry = nvidiaModelEntry(backend.model);
+    if (!entry) {
+      return {
+        ok: false,
+        code: "UNREACHABLE",
+        error: `NVIDIA model "${backend.model}" is not in the vetted catalog`,
+        latencyMs: 0,
+        backend,
+      };
+    }
+    const verdict = takeToken("nvidia", nvidiaRateLimitPerMinute(), 60_000);
+    if (!verdict.allowed) {
+      return {
+        ok: false,
+        code: "RATE_LIMITED",
+        error: `the NVIDIA backup is limited to ${nvidiaRateLimitPerMinute()} calls/minute on the free tier — retry in ${verdict.retryAfterSec}s`,
+        latencyMs: 0,
+        backend,
+        retryAfterSec: verdict.retryAfterSec,
+      };
+    }
+    headers["Authorization"] = `Bearer ${key}`;
+    body = buildNvidiaRequestBody({
+      model: entry,
+      messages,
+      temperature: opts.temperature ?? 0.4,
+      maxTokens: opts.maxTokens ?? maxTokens(),
+      thinking: cfg.thinking,
+    });
   } else {
     body = {
       model: backend.model,
@@ -481,7 +644,7 @@ export async function callAgent(
     };
   }
 
-  const hosted = backend.kind === "hosted_fallback" || backend.kind === "hosted_manager";
+  const hosted = backend.kind !== "project_worker";
   const url = hosted ? `${backend.endpoint}/chat/completions` : `${backend.endpoint}/v1/chat/completions`;
 
   let res: Response;

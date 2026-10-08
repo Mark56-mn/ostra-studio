@@ -902,3 +902,83 @@ kernels, **not** an enabled button onto the wrong notebook.
   pushes that notebook with the owning account's token.
 - `npm run typecheck` → exit 0 · `bun run lint` → exit 0 (pre-existing warnings only).
 - `bun --filter @ostra/web build` → exit 0 (`/runner` and `/management` in the route table).
+
+---
+
+## Addendum 13 — 2026-10-08: NVIDIA free models as a backup, a real provider switch, and agent thinking on screen
+
+**Request.** "Adding and using Nvidia free models as a backup for all the ai models we currently have;
+should be a place where I can switch all the ai models to nvidia models and use them; add all the
+necessary security layers; and I want to see what the agents are thinking when we are having a
+conversation."
+
+### What was built
+
+1. **NVIDIA NIM (`build.nvidia.com`) as a hosted backup for every slot.** `NVIDIA_API_KEY` (alias
+   `NVIDIA_NIM_API_KEY`) + `NVIDIA_BASE_URL` (default `https://integrate.api.nvidia.com/v1`) +
+   `NVIDIA_CHAT_MODEL` (default `meta/llama-3.3-70b-instruct`) + optional `NVIDIA_MODEL_<SLOT>`,
+   `NVIDIA_THINKING`, `NVIDIA_RATE_LIMIT_PER_MIN`. It is a new backend kind `hosted_nvidia`
+   (`apps/api/src/lib/agentRuntime.ts`), so the same call path serves Script AI, Image AI, Voice AI, the
+   Showrunner and the Management Team.
+2. **The switch.** Migration `supabase/migrations/009_provider_routing.sql` (single-row `provider_routing`)
+   + `apps/api/src/lib/routing.ts` + `apps/api/src/routes/routing.ts` → `GET|PATCH /api/routing`. Modes:
+   `own` (project runtimes only — a room says "nothing can answer" instead of using an API), `auto`
+   (default: own worker if genuinely ONLINE, else NVIDIA, else `OPENAI_*`), `nvidia` (everything through
+   NIM). Per-slot overrides supported (`{ slot, slotMode }`, `slotMode: null` inherits). UI:
+   `apps/web/src/components/ProviderRouting.tsx` on `/models` — three explicit mode cards, a per-agent
+   override table, the NVIDIA status card and the catalog list. Every change is audited as
+   `events.type = 'routing.changed'`.
+3. **Security layers** (all server-side, all unit-tested in
+   `packages/shared/src/providers/nvidia.test.ts` / `apps/api/src/lib/agentRuntime.nvidia.test.ts`):
+   endpoint allowlist (the key is never sent to a non-NVIDIA host — a wrong `NVIDIA_BASE_URL` is refused
+   before the request, verified by asserting `fetch` was not called), model-id allowlist (only the vetted
+   catalog is dispatchable), per-model reasoning switch (`enable_thinking`, never a guessed kwarg), no
+   forced `response_format: json_object` (it suppresses reasoning and not every NIM model implements it),
+   an in-memory sliding-window limiter (`apps/api/src/lib/rateLimit.ts`) → `429 RATE_LIMITED` with a real
+   `Retry-After`, secret redaction extended to `nvapi-` values and NVIDIA key names
+   (`redactSecrets`), the key added to the server-only `getServerSecret` union, and the endpoint host (never
+   the URL) as the only thing ever returned to a client.
+4. **Thinking on screen.** Both conversation surfaces now use one component
+   (`apps/web/src/components/ThinkingBlock.tsx`), **expanded by default**, with a real word count, above the
+   message it belongs to (`/chat`, `/studio`). Nothing is invented: `parseAgentResponse` splits a separate
+   `reasoning_content` channel or inline ` thinking…</think>` out of the answer *before* the JSON envelope is
+   parsed, and a model that produced no trace renders no block. On the NVIDIA side, thinking is requested
+   (and the token budget floored to 2048) only for models that document the switch — see
+   `AGENT_CONTRACTS.md` → "Conversation-thinking exception" (its "collapsed by default" wording was
+   superseded) and the new "Hosted backup — NVIDIA NIM + provider routing" section.
+
+### Verification (actually run, 2026-10-08)
+
+- `bun test` → **394 pass / 0 fail** (31 files). New: `packages/shared/src/providers/nvidia.test.ts`,
+  `packages/shared/src/providers/routing.test.ts`, `apps/api/src/lib/rateLimit.test.ts`,
+  `apps/api/src/lib/routing.test.ts`, `apps/api/src/lib/agentRuntime.nvidia.test.ts`.
+- `npm run typecheck` → exit 0 (web typecheck + api build).
+- `bun run lint` → exit 0 (pre-existing warnings only).
+
+### Not verified (honest limitations)
+
+- **No live NVIDIA call was made** — no `NVIDIA_API_KEY` exists in this workspace, so the real probe,
+  the real model ids against the account and the real reasoning channel are unexercised. Every NVIDIA path
+  is covered by mocked-fetch tests only; `README.md` and `docs/API_ENV.md` say so.
+- Migration `009` **was applied** to the live Postgres database with `node scripts/apply-migration.mjs
+  supabase/migrations/009_provider_routing.sql` → `APPLIED OK`. A follow-up read confirms `provider_routing`
+  exists with columns `id/mode/slots/updated_by/updated_at`, checks `id = 1` and
+  `mode in ('own','auto','nvidia')`, trigger `trg_provider_routing_touch`, and the seeded default row
+  (`id=1, mode='auto', slots={}`). The missing-table degrade path is still unit-tested only.
+- `/api/routing` was not called live (needs Supabase on the backend); the `/models` panel was verified by
+  typecheck/build only, not by rendering against a live backend.
+
+### Operator steps
+
+1. ~~Run `supabase/migrations/009_provider_routing.sql`.~~ Already applied (see above).
+2. On Render set `NVIDIA_API_KEY` (build.nvidia.com → Get API Key, `nvapi-…`). Optionally
+   `NVIDIA_CHAT_MODEL=qwen/qwen3-next-80b-a3b-instruct` for visible thinking, or per-slot
+   `NVIDIA_MODEL_<SLOT>`.
+3. Open `/models` → pick a routing mode. `NVIDIA for everything` needs no Kaggle runtime at all; `Auto`
+   keeps the project's own models first.
+
+### Superseded wording
+
+- `AGENT_CONTRACTS.md` "Agent Chat exception … it is collapsed by default" → replaced by
+  "Conversation-thinking exception" (expanded by default, both surfaces).
+- `docs/API_ENV.md` chat-page note "collapsible THINKING block" → "expanded THINKING block".

@@ -176,6 +176,77 @@ export function kaggleApiTokensFor(workerType: string): string[] {
   return out;
 }
 
+// ── NVIDIA NIM (hosted backup for every agent) ───────────────────────────────
+// NVIDIA's free NIM endpoints are OpenAI-compatible, so they are a drop-in backup for every agent
+// slot when the project's own runtime is not ONLINE. The key is server-only: this function is never
+// bundled into a browser response, and `nvidiaConfig()` deliberately returns no key to any caller
+// that would serialize it (see apps/api/src/lib/agentRuntime.ts, where it becomes an Authorization
+// header and nothing else).
+//
+// `NVIDIA_API_KEY` is the documented name; `NVIDIA_NIM_API_KEY` is accepted as an alias so an operator
+// who copied NVIDIA's own docs does not end up with a silently unconfigured backup.
+export type NvidiaConfig = {
+  apiKey?: string;
+  /** Verified OpenAI-compatible base; only an allowlisted host may receive the key (see providers/nvidia.ts). */
+  baseUrl: string;
+  /** The model used unless a slot-specific override exists. */
+  model: string;
+  host: string | null;
+  /** Is `NVIDIA_THINKING` on? Reasoning is requested only for models that document a switch. */
+  thinking: boolean;
+  configured: boolean;
+  reason?: string;
+};
+
+const NVIDIA_DEFAULT_MODEL_NAME = "meta/llama-3.3-70b-instruct";
+const NVIDIA_DEFAULT_BASE = "https://integrate.api.nvidia.com/v1";
+
+/** Clamp the per-minute hosted-call budget so a typo cannot disable the limiter or open it wide. */
+export function nvidiaRateLimitPerMinute(): number {
+  const raw = parseInt(process.env.NVIDIA_RATE_LIMIT_PER_MIN ?? "20", 10);
+  if (!Number.isFinite(raw)) return 20;
+  return Math.max(1, Math.min(600, raw));
+}
+
+function nvidiaThinkingEnabled(): boolean {
+  const raw = clean(process.env.NVIDIA_THINKING)?.toLowerCase();
+  return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+export function nvidiaConfig(): NvidiaConfig {
+  const apiKey = clean(process.env.NVIDIA_API_KEY) ?? clean(process.env.NVIDIA_NIM_API_KEY);
+  const baseUrl = clean(process.env.NVIDIA_BASE_URL) ?? NVIDIA_DEFAULT_BASE;
+  const model =
+    clean(process.env.NVIDIA_CHAT_MODEL) ?? NVIDIA_DEFAULT_MODEL_NAME;
+  const host = (() => {
+    try {
+      return new URL(baseUrl).host;
+    } catch {
+      return null;
+    }
+  })();
+  const base: Omit<NvidiaConfig, "configured" | "reason"> = {
+    baseUrl,
+    model,
+    host,
+    thinking: nvidiaThinkingEnabled(),
+  };
+  if (!apiKey) {
+    return {
+      ...base,
+      configured: false,
+      reason: "Set NVIDIA_API_KEY on the backend (build.nvidia.com → Get API Key; the key starts with nvapi-)",
+    };
+  }
+  return { ...base, apiKey, configured: true };
+}
+
+/** The NVIDIA model for one agent slot: `NVIDIA_MODEL_<SLOT>` when set, else the shared default. */
+export function nvidiaModelForSlot(slot: string): string {
+  const key = `NVIDIA_MODEL_${slot.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+  return clean(process.env[key]) ?? nvidiaConfig().model;
+}
+
 // ── Management Team (hosted, OpenAI-compatible) ──────────────────────────────
 // The management team is a HOSTED model, not a worker row: there is no notebook to heartbeat. It is
 // therefore health-checked with a real (tiny) completion call, never with mere configuration presence.
@@ -305,7 +376,9 @@ export function colabConfig(workerType: string): ColabConfig {
 }
 
 // Server-only getter that throws if called from the browser for secret keys.
-export function getServerSecret(key: "SUPABASE_SERVICE_ROLE_KEY" | "KAGGLE_API_TOKEN" | "YOUTUBE_CLIENT_SECRET") {
+export function getServerSecret(
+  key: "SUPABASE_SERVICE_ROLE_KEY" | "KAGGLE_API_TOKEN" | "YOUTUBE_CLIENT_SECRET" | "NVIDIA_API_KEY"
+) {
   if (typeof window !== "undefined") throw new Error(`${key} is server-only`);
   return process.env[key];
 }

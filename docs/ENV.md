@@ -79,6 +79,18 @@ COLAB_RUNTIME_ID=...                      # optional runtimeId for POST /v1beta/
 # from a real Colab runtime + worker registration; Script state comes from the Kaggle push lifecycle.
 # If they are still set on Render they are ignored (they cannot make a provider appear ONLINE).
 
+# Hosted backup — NVIDIA NIM (build.nvidia.com). Optional. When set it becomes the backup every agent
+# slot answers from while its own runtime is not ONLINE, and it can be forced for all of them from /models.
+# The key is server-only (it never reaches the browser) and is only ever sent to an allowlisted NVIDIA host.
+NVIDIA_API_KEY=                            # build.nvidia.com → Get API Key (keys look like nvapi-...)
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1   # default; another host is refused, not used
+NVIDIA_CHAT_MODEL=meta/llama-3.3-70b-instruct         # default; must be in the vetted catalog
+NVIDIA_MODEL_<SLOT>=                       # optional per-slot override (SCRIPT/IMAGE/VOICE/OVERSEER/MANAGER)
+NVIDIA_THINKING=true                       # request reasoning where the model documents a switch
+NVIDIA_RATE_LIMIT_PER_MIN=20               # local free-tier guard (1..600) → 429 RATE_LIMITED
+# Routing mode (own | auto | nvidia + per-slot overrides) lives in the provider_routing table
+# (migration 009), not in an env var — see docs/API_ENV.md → "Provider routing".
+
 # YouTube OAuth (Phase 9)
 YOUTUBE_CLIENT_ID=
 YOUTUBE_CLIENT_SECRET=
@@ -138,12 +150,17 @@ The push only **requests** a run. The notebook itself must then register and kee
 ## Supabase setup (once)
 
 1. Create project at https://supabase.com
-2. Run **all five** migrations in SQL editor (idempotent, in order):
+2. Run **all nine** migrations (idempotent, in order). Either paste them into the Supabase SQL editor or
+   run `node scripts/apply-migration.mjs supabase/migrations/<file>.sql` per file:
    - `supabase/migrations/001_initial.sql`
    - `supabase/migrations/002_runtime_supervisor.sql`
    - `supabase/migrations/003_runtime_supervisor_extensions.sql`
    - `supabase/migrations/004_model_controls.sql` (per-model on/off switches → `/api/models` + `/models`)
    - `supabase/migrations/005_conversations.sql` (Agent Chat rooms + messages → `/api/chat/*` + `/chat`)
+   - `supabase/migrations/006_chat_reasoning.sql` (reasoning channel for Agent Chat)
+   - `supabase/migrations/007_agent_channel.sql` (agent-to-agent channel)
+   - `supabase/migrations/008_overseer_worker_type.sql` (Showrunner worker type)
+   - `supabase/migrations/009_provider_routing.sql` (own/auto/NVIDIA routing → `/api/routing` + `/models`)
 3. Create Storage bucket `ostra-assets` (private with signed URLs or public — your call)
 4. Copy URL + anon key + service_role key into the Render env as above
 

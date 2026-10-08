@@ -54,6 +54,37 @@ POST {NEXT_PUBLIC_API_URL}/api/agents/rooms/:id/dispatch   → manager speaks fi
 The channel list on the page is the real `agent_messages` rows — instructions the management team sent to
 the agents appear there as `instruction`, exactly as they were stored.
 
+## AI Models + provider routing — `/models`
+
+The control plane for *which* AI answers. Everything on the page comes from the Render API; no secret and
+no new Vercel env var is needed (the NVIDIA key stays on the backend).
+
+```
+GET   {NEXT_PUBLIC_API_URL}/api/routing   → mode + per-agent route + real NVIDIA probe health
+PATCH {NEXT_PUBLIC_API_URL}/api/routing   → { mode } or { slot, slotMode }
+GET   {NEXT_PUBLIC_API_URL}/api/models    → per-model switch + real health
+PATCH {NEXT_PUBLIC_API_URL}/api/models/:key
+```
+
+- **Provider routing switch** (`apps/web/src/components/ProviderRouting.tsx`): three explicit modes —
+  `Own models only` / `Auto — own first, backup second` / `NVIDIA for everything` — plus a per-agent
+  override select that can inherit the global mode. A change is a real `PATCH`, is audited server-side as
+  `routing.changed`, and the panel then re-renders from the backend's answer (no optimistic UI).
+- **NVIDIA backup card** shows the configured model, the endpoint *host* (never the URL) and the result of
+  a real completion probe. A key being present is never shown as ONLINE; when no key exists the card says
+  so and names `NVIDIA_API_KEY`, and mode `nvidia` renders a blocking warning.
+- **Per-agent table** shows what each slot will answer from right now (`answers from` + the backend's own
+  explanation), so a slot that cannot be routed anywhere is visible instead of silently broken.
+- **Catalog list** is the only set of dispatchable NVIDIA model ids; a model outside it is refused by the
+  backend, not forwarded.
+
+## Seeing what the agents are thinking
+
+`/chat` and `/studio` render each message's own reasoning in a **THINKING** block above it
+(`apps/web/src/components/ThinkingBlock.tsx`), expanded by default with a real word count. It shows only
+what the model actually produced — a model that did not think renders no block at all. See
+`AGENT_CONTRACTS.md` → "Conversation-thinking exception" for the bounds of this display.
+
 ## Runner — `/runner` (one button per AI)
 
 `/runner` renders one run button per entry in `MODEL_CATALOG` (`packages/shared/src/providers/models.ts`).

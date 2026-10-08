@@ -91,6 +91,28 @@ key exists. A key alone never makes it ONLINE.
 - `full` — it may additionally request a start; each target is still checked against the real autostart
   path (`autostartRefusal`) and runs through the same `runNowByWorker` the Run Now button uses.
 
+```bash
+# --- NVIDIA NIM — hosted backup for every agent (optional) ---
+# An OpenAI-compatible, free-tier endpoint (build.nvidia.com → Get API Key; keys look like nvapi-...).
+# When set, it becomes the backup every agent slot answers from when its own runtime is not ONLINE, and
+# it can be forced for all of them from /models (provider routing). The key is server-only: it becomes
+# an Authorization header and is never returned to a client.
+NVIDIA_API_KEY=
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1   # default; only an allowlisted NVIDIA host is accepted
+NVIDIA_CHAT_MODEL=meta/llama-3.3-70b-instruct          # default; must be in the vetted catalog
+NVIDIA_MODEL_SCRIPT=                                   # optional per-slot override (…_IMAGE/_VOICE/_OVERSEER/_MANAGER)
+NVIDIA_THINKING=true                                   # request reasoning where the model documents a switch
+NVIDIA_RATE_LIMIT_PER_MIN=20                           # local free-tier guard (1..600)
+```
+
+Model ids are restricted to the vetted catalog in `packages/shared/src/providers/nvidia.ts`
+(`meta/llama-3.3-70b-instruct`, `meta/llama-3.1-8b-instruct`, `qwen/qwen3-next-80b-a3b-instruct`,
+`deepseek-ai/deepseek-r1`, `nvidia/nemotron-3-super-120b-a12b`, `qwen/qwen2.5-coder-32b-instruct`). An id
+outside it is refused with the allowed list rather than forwarded, and the key is only ever sent to
+`integrate.api.nvidia.com` / `api.nvidia.com` even if `NVIDIA_BASE_URL` says something else. Switching the
+routing mode to `nvidia` does **not** make it ONLINE: a real completion probe (cached 60s) decides, and
+the result is reported verbatim.
+
 ### Model switches — `GET /api/models` / `PATCH /api/models/:key`
 
 Backed by the `model_controls` table (migration `004_model_controls.sql`). No new env vars.
@@ -256,8 +278,37 @@ AGENT_MAX_TOKENS=900
 
 The dashboard page is `/chat` (nav: **Agent Chat**): transcript + composer on the left, rooms and the live
 store panel on the right. The transcript polls every 3s and the store panel every 6s, so a change made in
-another tab shows up without a reload. Each assistant message with a thinking trace renders it in a
-collapsible **THINKING** block (word count in the summary) directly above the answer it belongs to.
+another tab shows up without a reload. Each message with a thinking trace renders it in an **expanded**
+**THINKING** block (word count in the summary) directly above the message it belongs to — the same
+component is used by the production channel on `/studio`. See `AGENT_CONTRACTS.md` → "Conversation-thinking
+exception" for why this is allowed and how it stays bounded.
+
+### Provider routing — `GET /api/routing` / `PATCH /api/routing`
+
+Which model family answers each agent. Backed by the `provider_routing` table (migration
+`009_provider_routing.sql`, one row). No required env vars — the vars above decide what is *possible*;
+this route decides what is *used*.
+
+```
+GET   /api/routing   → { settings: { mode, slots, updatedAt, updatedBy }, read_reason,
+                         nvidia: { configured, host, model, thinking, reason, health, catalog[] },
+                         slots: [{ slot, mode, available, kind, provider, model, endpointHost, detail }] }
+
+PATCH /api/routing   → { mode }                        # own | auto | nvidia
+                       { slot, slotMode }              # per-agent override; slotMode=null inherits
+                     → the same payload + { changed, actor }
+```
+
+`mode` values:
+- `own` — only project runtimes may answer. Nothing ONLINE ⇒ the room says so (no hosted model is used).
+- `auto` (default) — the project's own worker when it is genuinely ONLINE, otherwise the hosted backup
+  (NVIDIA NIM first, then `OPENAI_*`).
+- `nvidia` — every slot answers through NVIDIA NIM, even while a runtime is ONLINE.
+
+The `slots` rows are produced by the same resolver the agents use (`resolveChannelBackend`), so the page
+shows what will really happen, and each change is audited as `events.type='routing.changed'`.
+Consequences: chat turns answered by the NVIDIA backup are rate-limited per minute and answer
+`429 RATE_LIMITED` with a real `Retry-After` (see `apps/api/src/lib/rateLimit.ts`).
 
 ### Kaggle auto-start (real, not probe-only) — `KaggleRuntimeStarter`
 

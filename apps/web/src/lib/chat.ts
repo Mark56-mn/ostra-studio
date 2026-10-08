@@ -23,7 +23,7 @@ export type AppliedAction = {
 };
 
 export type ChatBackend = {
-  kind: "project_worker" | "hosted_fallback";
+  kind: "project_worker" | "hosted_nvidia" | "hosted_fallback" | "hosted_manager";
   provider: string;
   model: string;
   endpointHost: string | null;
@@ -42,7 +42,7 @@ export type AgentCandidate = {
 /** What the backend says about the AI that would answer right now. */
 export type AgentStatus = {
   available: boolean;
-  kind: "project_worker" | "hosted_fallback" | null;
+  kind: "project_worker" | "hosted_nvidia" | "hosted_fallback" | "hosted_manager" | null;
   provider: string | null;
   model: string | null;
   endpointHost: string | null;
@@ -245,10 +245,17 @@ export function actionTone(action: AppliedAction): "ok" | "bad" {
   return action.ok ? "ok" : "bad";
 }
 
-/** Short label for the model that produced an answer. */
+/** Short label for the model that produced an answer. Names the real answer source. */
 export function backendLabel(backend: ChatBackend | null): string | null {
   if (!backend) return null;
-  const where = backend.kind === "project_worker" ? "project runtime" : "hosted fallback";
+  const where =
+    backend.kind === "project_worker"
+      ? "project runtime"
+      : backend.kind === "hosted_nvidia"
+        ? "NVIDIA backup"
+        : backend.kind === "hosted_manager"
+          ? "hosted management team"
+          : "hosted fallback";
   return `${backend.model} · ${where}`;
 }
 

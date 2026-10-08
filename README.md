@@ -99,10 +99,8 @@ bun install
 
 # --- Supabase (once) ---
 # 1) Create project at https://supabase.com
-# 2) Run ALL three migrations in order in SQL editor:
-#    supabase/migrations/001_initial.sql
-#    supabase/migrations/002_runtime_supervisor.sql
-#    supabase/migrations/003_runtime_supervisor_extensions.sql
+# 2) Run EVERY migration in order in the SQL editor (001 → 009 — migrations are additive/idempotent):
+#    supabase/migrations/001_initial.sql … 009_provider_routing.sql
 # 3) Create Storage bucket `ostra-assets`
 
 # --- Render env (apps/api — secrets live here only) ---
@@ -111,7 +109,8 @@ bun install
 # WORKER_REGISTRATION_TOKEN (or WORKER_REGISTRATION_SECRET), CRON_SECRET,
 # SCHEDULER_ENABLED, KAGGLE_API_TOKEN(_n/_<name>), KAGGLE_KERNEL_REF, KAGGLE_KERNEL_REF_<SLOT>, KAGGLE_EXEC_DISABLED,
 # GOOGLE_CLOUD_PROJECT/COLAB_PROJECT_ID, GOOGLE_OAUTH_TOKEN/COLAB_OAUTH_TOKEN,
-# COLAB_RUNTIME_SPEC, COLAB_IMAGE_BOOTSTRAP_URL/COLAB_VOICE_BOOTSTRAP_URL, AUTO_PUBLISH=false
+# COLAB_RUNTIME_SPEC, COLAB_IMAGE_BOOTSTRAP_URL/COLAB_VOICE_BOOTSTRAP_URL, AUTO_PUBLISH=false,
+# NVIDIA_API_KEY (hosted backup; optional NVIDIA_BASE_URL/NVIDIA_CHAT_MODEL/NVIDIA_MODEL_<SLOT>/NVIDIA_THINKING/NVIDIA_RATE_LIMIT_PER_MIN)
 # (KAGGLE_SCRIPT_URL / COLAB_IMAGE_URL / COLAB_VOICE_URL / KOKORO_VOICE_URL are removed — do not set them)
 # See docs/ENV.md + docs/API_ENV.md for the full list.
 
@@ -150,6 +149,7 @@ supabase/migrations/005_conversations.sql  # Agent Chat rooms + messages (/api/c
 supabase/migrations/006_chat_reasoning.sql  # + chat_messages.reasoning (model thinking shown separately)
 supabase/migrations/007_agent_channel.sql  # AI Studio agent-to-agent channel (/api/agents/*, /studio)
 supabase/migrations/008_overseer_worker_type.sql  # allows the dedicated Showrunner worker type
+supabase/migrations/009_provider_routing.sql  # provider routing (own | auto | nvidia) — /api/routing, /models
 docs/ENV.md             # split env reference (now includes supervisor vars + aliases)
 handoffs/               # mandatory handovers
 ```
@@ -162,7 +162,8 @@ handoffs/               # mandatory handovers
 - `/projects/[id]` — story bible + characters + locations + episodes
 - `/episodes/[id]` — episode detail, pipeline, tasks, scenes, approvals, artifacts
 - `/chat` — Agent Chat room where the director talks to the Script AI (it can write the store)
-- `/studio` — **AI Studio** production channel: Script AI ↔ Image AI ↔ Voice AI coordinate, and the Showrunner reports back to the director
+- `/studio` — **AI Studio** production channel: Script AI ↔ Image AI ↔ Voice AI coordinate, and the Showrunner reports back to the director (every message shows that agent's own thinking)
+- `/models` — AI model on/off switches **and the provider routing switch** (own runtimes / NVIDIA free models / auto), with the real NVIDIA probe and the per-agent route
 - `/agents` — Agent Room + live provider health probe (from Render)
 - `/activity` — immutable audit log (polls Render)
 - `/api/health` — dev shim that proxies to `NEXT_PUBLIC_API_URL/api/health` (reports `DEGRADED` + reason when unset)
@@ -188,6 +189,8 @@ handoffs/               # mandatory handovers
 - `GET|POST /api/artifacts`
 - Agent Chat (migration `005` + `006`):
   - `GET|POST /api/chat/rooms` · `PATCH /api/chat/rooms/:id` · `GET|POST /api/chat/rooms/:id/messages` · `GET /api/chat/store`
+- Provider routing (migration `009`):
+  - `GET|PATCH /api/routing` — which model family answers each agent (`own` | `auto` | `nvidia`, plus per-slot overrides), the real NVIDIA probe result, and the same per-slot resolution the agents use. Unknown modes/slots are a 400; every change is audited as `routing.changed`.
 - AI Studio agent channel (migration `007`):
   - `GET /api/agents/roster` — the four roles (Script/Image/Voice/Showrunner) with their REAL live status
   - `GET|POST /api/agents/rooms` · `PATCH /api/agents/rooms/:id` · `GET /api/agents/rooms/:id/messages`
@@ -200,6 +203,8 @@ Every agent that performs repository work MUST create or update a handover in `h
 `handoffs/HANDOFF-YYYY-MM-DD-<short-task-name>.md` with the 12 required sections in `HANDOFF_PROTOCOL.md`.
 
 ## Current status
+
+**NVIDIA free-model backup + provider routing + agent thinking — code complete, type/test/lint-verified 2026-10-08 (Render redeploy of `main` and migration `009` required).** Every agent (Script AI, Image AI, Voice AI, Showrunner and the Management Team) can now answer from **NVIDIA NIM** (`NVIDIA_API_KEY`, OpenAI-compatible, free tier) as a backup or, on request, for everything. `GET|PATCH /api/routing` persists one explicit decision (`own` | `auto` | `nvidia` + per-slot overrides) in `provider_routing`, and `/models` renders it with the real probe result and the per-agent route. Security is enforced server-side and unit-tested: the key is only sent to an allowlisted NIM host, only vetted catalog model ids are dispatchable, reasoning uses the model's own documented switch, JSON mode is never forced (it would suppress thinking), and a local sliding-window limiter protects the free tier with a real `429` + `Retry-After`. Thinking is now shown on `/chat` **and** `/studio` in an expanded **THINKING** block above each message. **No live NVIDIA call has been exercised yet** — the key is not set. See the latest handover in `handoffs/`.
 
 **AI Studio multi-agent channel — code complete, build/type/test-verified 2026-09-30 (Render redeploy of `main` required).** Agents can now talk to each other. Migration `007` adds `chat_rooms.kind` (`director` | `studio`) and the `agent_messages` table; `POST /api/agents/rooms/:id/dispatch` runs one bounded production round where Script AI briefs Image AI, Image AI hands off to Voice AI, and the Showrunner (overseer) reports the real status to the director. Each agent is called only when it is genuinely ONLINE, only messages a model actually emitted are stored, and store writes go through the same additive allow-list as Agent Chat. New Kaggle notebooks for Image/Voice/Showrunner were generated by `scripts/kaggle-agent-notebook.ts`. The `/studio` page renders it. See the latest handover in `handoffs/`.
 
