@@ -167,7 +167,8 @@ handoffs/               # mandatory handovers
 - `/runtimes` — **runtime schedules** (create/edit/toggle/delete, days_of_week, Run Now), Agent Room, provider health, startup history with lifecycle states
 - `/projects/[id]` — story bible + characters + locations + episodes
 - `/episodes/[id]` — episode detail, pipeline, tasks, scenes, approvals, artifacts
-- `/chat` — Agent Chat room where the director talks to the Script AI (it can write the store)
+- `/seasons` — **season-first approval**: the complete season package (per-episode synopses, cast, arcs, ending, open assumptions, production estimate), submit / approve / request changes / reject, the production-gate banner, and the in-app inbox
+- `/chat` — Agent Chat room where the director talks to the Script AI (it can write the store). The **Auto-work** button next to Send lets the AI keep working on a task with no human in the middle: it sends itself a real continuation turn after every answer (each one a transcript row), and stops on the model's own `LOOP DONE` signal, a 10-step cap, a bounded free-tier rate-limit wait budget, or the Stop button
 - `/studio` — **AI Studio** production channel: Script AI ↔ Image AI ↔ Voice AI coordinate, and the Showrunner reports back to the director (every message shows that agent's own thinking)
 - `/models` — AI model on/off switches **and the provider routing switch** (own runtimes / NVIDIA free models / auto), with the real NVIDIA probe and the per-agent route
 - `/agents` — Agent Room + live provider health probe (from Render)
@@ -186,6 +187,15 @@ handoffs/               # mandatory handovers
 - `GET|POST /api/tasks` · `PATCH /api/tasks/:id`
 - `GET|POST /api/events`
 - `GET|POST /api/approvals`
+- Seasons — season-first approval (migration `010`):
+  - `GET|POST /api/seasons` · `GET|PATCH /api/seasons/:id` · `POST /api/seasons/:id/submit` · `POST /api/seasons/:id/decision`
+  - `GET /api/notifications` · `POST /api/notifications/:id/read` — the in-app inbox (season needs a decision, task failed)
+  - `POST /api/tasks` **refuses** image/voice/video/YouTube work with `409 SEASON_NOT_APPROVED` until a season for that project is approved — the same pure rule the `/seasons` page renders
+  - `bun scripts/smoke-seasons.ts` — the end-to-end acceptance test for that gate (drives the real route handlers, cleans up after itself)
+- Media generation — real provider adapters (verified NVIDIA endpoints):
+  - `GET /api/media/providers` — the registry (modalities, documented limits, trial tier, honest notes), key presence only — never the key
+  - `POST /api/media/generate` — `{ capability: text2image|image2video|tts, prompt, image_base64? }` → real bytes + provenance; a failure is the provider's real failure (429 keeps its Retry-After)
+  - `POST /api/media/probe` — one real generation to answer "is this available for THIS account" with the provider's own reply
 - `GET|POST /api/workers` · `PATCH /api/workers/:id` · `POST /api/workers/:id/heartbeat` · `POST /api/workers/register` · `POST /api/workers/heartbeat` (by identity — authenticated when token is set, supports dynamic endpoint, `current_task`, `metadata`). `GET /api/workers` returns real rows with a heartbeat-derived `health` per worker, or `503` + reason when Supabase is not configured — never a synthetic offline list.
 - Runtime supervisor:
   - `GET|POST /api/runtime/schedules` · `GET|PATCH|DELETE /api/runtime/schedules/:id` · `POST /api/runtime/schedules/seed`

@@ -19,6 +19,17 @@ import { listSchedules, createSchedule, getSchedule, patchSchedule, deleteSchedu
 import { schedulerTickHandler, runNowHandler, listStartupHistory } from "./routes/runtime.js";
 import { listRooms, createRoom, patchRoom, listMessages, postMessage, getStore } from "./routes/chat.js";
 import {
+  listSeasons,
+  createSeason,
+  getSeason,
+  patchSeason,
+  submitSeason,
+  decideSeason,
+  listNotifications,
+  markNotificationRead,
+} from "./routes/seasons.js";
+import { listMediaProviders, generateMediaHandler, probeMediaHandler } from "./routes/media.js";
+import {
   getRoster,
   getManagementPolicy,
   listStudioRooms,
@@ -78,6 +89,23 @@ app.post("/api/events", createEvent);
 // Approvals (human gate, AUTO_PUBLISH=false by default)
 app.get("/api/approvals", listApprovals);
 app.post("/api/approvals", createApproval);
+
+// Seasons — the season-first approval package. Production is gated on an approved season.
+app.get("/api/seasons", listSeasons);
+app.post("/api/seasons", createSeason);
+app.get("/api/seasons/:id", getSeason);
+app.patch("/api/seasons/:id", patchSeason);
+app.post("/api/seasons/:id/submit", submitSeason);
+app.post("/api/seasons/:id/decision", decideSeason);
+
+// Notifications — in-app inbox (season needs a decision, task failed, agent offline)
+app.get("/api/notifications", listNotifications);
+app.post("/api/notifications/:id/read", markNotificationRead);
+
+// Media — real generation through the verified provider registry (image / image2video / TTS)
+app.get("/api/media/providers", listMediaProviders);
+app.post("/api/media/generate", generateMediaHandler);
+app.post("/api/media/probe", probeMediaHandler);
 
 // Workers (registry + heartbeat + self-registration)
 app.get("/api/workers", listWorkers);

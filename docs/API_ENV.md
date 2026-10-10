@@ -305,6 +305,61 @@ another tab shows up without a reload. Each message with a thinking trace render
 component is used by the production channel on `/studio`. See `AGENT_CONTRACTS.md` → "Conversation-thinking
 exception" for why this is allowed and how it stays bounded.
 
+**Auto-work** (the toggle beside **Send**) is the operator's grant to let the AI work without a human in
+the middle. It is implemented in the browser (`apps/web/src/lib/autoloop.ts` holds the policy, the chat page
+runs the driver) and uses no extra API: after each answer the page POSTs one more real
+`/api/chat/rooms/:id/messages` turn — the instruction `continuePrompt()` builds — so every step is an
+ordinary, audited transcript row and closing the tab loses no work. The loop always ends with a real
+reason on screen, from exactly five causes: the model's own `LOOP DONE` reply, the 10-step cap, the
+rate-limit/error budget (`AUTOLOOP_MAX_RATE_LIMIT_WAITS`, `AUTOLOOP_MAX_ERROR_RETRIES`, and a 429 that asks
+for more than `AUTOLOOP_MAX_WAIT_MS` stops immediately — the backend's `retry_after_sec` is honoured, never
+hammered), the human pressing **Stop** (`CONSTRAINTS.md` 25), or the human switching to another room (the
+loop works the room it started in and will not write where nobody is looking). It runs only while the page
+is open — there is no server-side queue and none is implied.
+
+### Seasons — the season-first approval gate — `GET|POST /api/seasons` · `/api/seasons/:id/submit` · `/api/seasons/:id/decision`
+
+```
+GET   /api/seasons?projectId=      → { seasons: [...], gates: { [projectId]: ProductionGate }, timestamp }
+POST  /api/seasons                 → body { project_id, package } → 201 { season, gate }  (400 SEASON_PACKAGE_INVALID + every problem)
+GET   /api/seasons/:id             → { season, gate }
+PATCH /api/seasons/:id             → body { package } → { season, gate }   (409 SEASON_LOCKED once approved)
+POST  /api/seasons/:id/submit      → { season, gate }                      (409 SEASON_NOT_SUBMITTABLE)
+POST  /api/seasons/:id/decision    → body { decision: approved|changes_requested|rejected, note?, decided_by? }
+                                    → { season, gate }   (409 SEASON_NOT_DECIDABLE)
+```
+
+The **production gate** is enforced where it matters: `POST /api/tasks` with `worker_type` in
+`image | voice | video | youtube` resolves the task's project (through the episode/scene when needed) and
+refuses with **409 `SEASON_NOT_APPROVED`** + `season_status` + the reason, until a season for that project is
+`approved`. `script` tasks are deliberately not gated — the story has to be written before it can be approved.
+The decision logic is pure (`packages/shared/src/domain/seasons.ts`, 17 tests): only a human decision on a
+`submitted` season can approve, and nothing in the codebase can approve a season by itself.
+
+### Notifications — `GET /api/notifications` · `POST /api/notifications/:id/read`
+
+In-app inbox, migration `010`. Raised by real state changes: a season submitted (`requires_action: true`),
+a season decided, a task failed (once per task, via `dedupe_key`). `GET` returns `{ notifications, unread }`.
+
+### Media generation — `GET /api/media/providers` · `POST /api/media/generate` · `POST /api/media/probe`
+
+Server-side only: requires `NVIDIA_API_KEY`; the browser only ever sees `nvidia_key_configured: true|false`.
+
+```
+GET   /api/media/providers  → { providers: [{ key, model, capability, host, tier, media_type, limits, note }],
+                                 nvidia_key_configured, availability, timestamp }
+POST  /api/media/generate   → body { capability: text2image|image2video|tts, prompt, image_base64?, image_media_type?,
+                                      resolution?, num_frames?, fps?, language?, voice?, project_id?, scene_id? }
+                              → 200 { base64, media_type, model, provider, latency_ms, bytes }  (bytes are NOT stored in the DB)
+                              → 429 + Retry-After (RATE_LIMITED) | 503 (NO_API_KEY) | 502 (NOT_AUTHORIZED | UPSTREAM_ERROR | BAD_OUTPUT)
+POST  /api/media/probe      → body { capability } → { available, bytes, latency_ms, code, reason, checked_at }
+```
+
+Live-probed from this account's key on 2026-10-09: **TTS is available** (HTTP 200, real WAV);
+**image and image-to-video are NOT enabled for this account** (HTTP 404 on every visual route, while the
+same host returns proper 400s for malformed requests). The adapters stay wired so enabling a model on
+build.nvidia.com works with no code change; until then the real 404 is reported, never a fabricated asset.
+
 ### Provider routing — `GET /api/routing` / `PATCH /api/routing`
 
 Which model family answers each agent. Backed by the `provider_routing` table (migration

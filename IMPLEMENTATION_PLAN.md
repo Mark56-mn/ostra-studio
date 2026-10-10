@@ -104,7 +104,7 @@ Required:
 - image versioning
 - failure/retry behavior
 
-**Status: interface shipped, auto-start blocked until verified** — `ColabImageRuntimeStarter` returns `NOT_AUTOSTARTABLE`; scheduler correctly skips with `not_autostartable` / `CANCELLED` instead of faking a start. Manual registration + heartbeat still work; a real Colab trigger must be researched/proven before promoting the starter.
+**Status: adapter shipped and live-probed; the endpoint is not enabled for this account (2026-10-09)** — the image provider adapter (`packages/shared/src/providers/media.ts` + `apps/api/src/lib/mediaProviders.ts`) targets NVIDIA's `POST …/v1/images/generations` and the documented Cosmos route, with an honest error map (401/403 → NOT_AUTHORIZED, 429 → RATE_LIMITED with the real Retry-After, timeout → TIMEOUT that explicitly does NOT claim generation stopped). The live probe from this account's key returned **HTTP 404 for every image model** (flux.1-schnell, sdxl-turbo, diffusiongemma) while the same host correctly returns 400 for malformed requests — i.e. no image model is *enabled for this account*. Enabling one on build.nvidia.com makes the adapter work with no code change. `ColabImageRuntimeStarter` remains `NOT_AUTOSTARTABLE` (honest), scheduler skips with `not_autostartable`. `POST /api/media/probe` reports the real availability any time it is asked.
 
 ## Phase 6 — Voice adapter
 
@@ -120,7 +120,20 @@ Future adapters:
 
 Voice must support scene/segment-level regeneration.
 
-**Status: same as Phase 5** — `ColabVoiceRuntimeStarter` (`kokoro-82m`) is explicit `NOT_AUTOSTARTABLE`; contract supports `kokoro-82m` on `colab` and future providers without rewriting the scheduler.
+**Status: REAL TTS VERIFIED LIVE (2026-10-09)** — `nvidia/magpie-tts-multilingual` answered **HTTP 200 with a real 67,628-byte WAV** (RIFF header verified) through the adapter in `apps/api/src/lib/mediaProviders.ts` (`buildTtsFields` + `looksLikeWav`, so a 200 that is not audio is refused rather than called generated). `ElevenLabs` stays optional (`CONSTRAINTS.md` 8) and is not required. Self-hosted Kokoro-82M remains the quota-free adapter target; `ColabVoiceRuntimeStarter` is still `NOT_AUTOSTARTABLE` because no real Colab trigger is proven.
+
+## Phase 6A — Season-first approval workflow (spec §5)
+
+**Status: shipped (2026-10-09)** — `supabase/migrations/010_seasons_and_notifications.sql` adds `seasons`
+(one complete package per cycle: title, premise, per-episode synopses, cast, world, arcs, ending,
+open `assumptions`, production estimate) and `notifications` (in-app inbox, idempotent via
+`dedupe_key`). The decision logic is pure and unit-tested in `packages/shared/src/domain/seasons.ts`
+(17 tests): only a human decision can approve, an approved season is locked against edits, and
+`productionGate()` refuses image/voice/video/YouTube task creation with `409 SEASON_NOT_APPROVED`
+until a season for that project is approved — enforced in `apps/api/src/routes/tasks.ts`, the same
+rule the `/seasons` page renders. `POST /api/seasons/:id/submit` raises the notification the spec's
+Phase 3 asks for. Routes: `/api/seasons` (+ `/submit`, `/decision`), `/api/notifications`.
+UI: `/seasons` (package review, approve / request changes / reject, gate banner, inbox).
 
 ## Phase 7 — Video rendering
 
