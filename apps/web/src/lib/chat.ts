@@ -97,7 +97,15 @@ export type SendResult =
    * before the AI call failed (it always tries) — so the transcript can show what was said with an
    * honest error, and never a fabricated answer.
    */
-  | { ok: false; error: string; code: string | null; userMessage: ChatMessage | null; agent: AgentStatus | null };
+  | {
+      ok: false;
+      error: string;
+      code: string | null;
+      /** The backend's real Retry-After (seconds) when it refused with 429 RATE_LIMITED. */
+      retryAfterSec: number | null;
+      userMessage: ChatMessage | null;
+      agent: AgentStatus | null;
+    };
 
 async function readJson(res: Response): Promise<{ json: Record<string, unknown> | null; text: string }> {
   const text = await res.text().catch(() => "");
@@ -187,15 +195,24 @@ export async function sendMessage(roomId: string, content: string): Promise<Send
     if (res.ok && json?.message) {
       return { ok: true, data: json as unknown as SendResponse };
     }
+    const retry = json?.retry_after_sec;
     return {
       ok: false,
       error: failure(res, json, text),
       code: typeof json?.error === "string" ? json.error : null,
+      retryAfterSec: typeof retry === "number" && Number.isFinite(retry) ? retry : null,
       userMessage: (json?.user_message as ChatMessage) ?? null,
       agent: (json?.agent as AgentStatus) ?? null,
     };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e), code: null, userMessage: null, agent: null };
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+      code: null,
+      retryAfterSec: null,
+      userMessage: null,
+      agent: null,
+    };
   }
 }
 

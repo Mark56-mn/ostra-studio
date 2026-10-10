@@ -6,6 +6,15 @@ import { Card, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { ThinkingBlock } from "@/components/ThinkingBlock";
 import {
+  AUTOLOOP_MAX_STEPS,
+  AUTOLOOP_TURN_PAUSE_MS,
+  continuePrompt,
+  decideNextTurn,
+  toLoopTurn,
+  type LoopBudget,
+  type LoopTurn,
+} from "@/lib/autoloop";
+import {
   actionLabel,
   actionTone,
   backendLabel,
@@ -22,6 +31,7 @@ import {
   type ChatMessage,
   type ChatRoom,
   type ProjectRef,
+  type SendResult,
   type StoreSnapshot,
 } from "@/lib/chat";
 
@@ -42,9 +52,23 @@ export default function ChatPage() {
   const [lastTurn, setLastTurn] = useState<{ applied: number; failed: number; rejected: string[]; backend: ChatBackend } | null>(null);
   const [newRoomTitle, setNewRoomTitle] = useState("");
   const [newRoomProject, setNewRoomProject] = useState("");
+  // AUTO-WORK — the operator's grant to let the AI keep working without a human in the middle.
+  const [autoWork, setAutoWork] = useState(false);
+  const [loopRunning, setLoopRunning] = useState(false);
+  const [loopStep, setLoopStep] = useState(0);
+  const [loopCountdown, setLoopCountdown] = useState<number | null>(null);
+  const [loopNote, setLoopNote] = useState<string | null>(null);
+  const [loopStatus, setLoopStatus] = useState<string | null>(null);
 
   const thinkingRef = useRef(false);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const autoWorkRef = useRef(false);
+  /** Bumped to cancel a waiting driver immediately (stop button, a new human task, toggle off). */
+  const loopEpochRef = useRef(0);
+  const loopRunningRef = useRef(false);
+  const budgetRef = useRef<LoopBudget>({ step: 0, rateWaits: 0, errorRetries: 0 });
+  const projectIdRef = useRef<string | null>(null);
+  const activeIdRef = useRef<string | null>(null);
 
   const activeRoom = useMemo(() => rooms?.find((r) => r.id === activeId) ?? null, [rooms, activeId]);
   const projectId = activeRoom?.project_id ?? null;
@@ -73,6 +97,19 @@ export default function ChatPage() {
     void refreshRooms();
     void refreshStore(null);
   }, [refreshRooms, refreshStore]);
+
+  // A loop driver holds one render's closures for minutes at a time, so the bound project is
+  // mirrored into a ref: a project created mid-loop keeps feeding the live store panel instead of
+  // the panel going blank on the next automatic step.
+  useEffect(() => {
+    projectIdRef.current = projectId;
+  }, [projectId]);
+
+  // The driver works the room it was started in, so switching rooms mid-session must end the loop
+  // out loud rather than let it keep writing somewhere the operator is no longer looking.
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
 
   // Transcript for the active room.
   const loadTranscript = useCallback(async (roomId: string) => {
@@ -127,18 +164,17 @@ export default function ChatPage() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, thinking]);
 
-  async function onSend(e: React.FormEvent) {
-    e.preventDefault();
-    const content = draft.trim();
-    if (!content || !activeId || thinking) return;
-    setDraft("");
+  // ── one real turn ────────────────────────────────────────────────────────
+  // Persist the message, call the model, apply the store writes, update the panels — and hand the
+  // backend's REAL result back so the caller (a human, or the auto-work loop) can decide next.
+  async function performTurn(roomId: string, content: string): Promise<SendResult> {
     setErr(null);
     setLastTurn(null);
     setElapsed(0);
     setThinking(true);
     thinkingRef.current = true;
     try {
-      const res = await sendMessage(activeId, content);
+      const res = await sendMessage(roomId, content);
       if (res.ok) {
         setMessages((prev) => mergeMessages(prev, [res.data.user_message, res.data.message]));
         setAgent(res.data.agent);
@@ -151,11 +187,12 @@ export default function ChatPage() {
         // If the agent just created the project this room had none of, bind the room to it so the
         // live store panel follows the story instead of staying empty.
         const created = res.data.applied.find((a) => a.op === "create_project" && a.ok && a.id);
-        let nextProjectId = projectId;
-        if (created?.id && !projectId) {
-          const bound = await patchRoom(activeId, { project_id: created.id });
+        let nextProjectId = projectIdRef.current;
+        if (created?.id && !nextProjectId) {
+          const bound = await patchRoom(roomId, { project_id: created.id });
           if (bound.ok) {
             nextProjectId = bound.data.project_id;
+            projectIdRef.current = nextProjectId;
             setRooms((prev) => (prev ? prev.map((room) => (room.id === bound.data.id ? bound.data : room)) : prev));
           }
         }
@@ -166,10 +203,116 @@ export default function ChatPage() {
         if (res.agent) setAgent(res.agent);
         setErr(res.error);
       }
+      return res;
     } finally {
       thinkingRef.current = false;
       setThinking(false);
     }
+  }
+
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /** Wait `ms`, ticking a visible countdown. False means the loop was cancelled meanwhile. */
+  async function countdown(ms: number, epoch: number): Promise<boolean> {
+    const end = Date.now() + ms;
+    for (;;) {
+      const left = Math.max(0, Math.ceil((end - Date.now()) / 1000));
+      setLoopCountdown(left);
+      if (left <= 0) {
+        setLoopCountdown(null);
+        return true;
+      }
+      await sleep(Math.min(1000, Math.max(50, end - Date.now())));
+      if (epoch !== loopEpochRef.current) {
+        setLoopCountdown(null);
+        return false;
+      }
+    }
+  }
+
+  // ── the auto-work loop ──────────────────────────────────────────────────
+  // It runs at most one driver at a time, never outlives its epoch, and always ends with a real
+  // reason on screen. Each step is a genuine message sent to the genuine backend, so closing the
+  // tab mid-session loses no work: every step it took is already in the transcript and the store.
+  async function driveLoop(roomId: string, outcome: LoopTurn) {
+    // An older driver exits within a tick of a new epoch (it can only be waiting, never mid-turn —
+    // the composer is disabled while a turn is in flight), so this bound is only housekeeping.
+    for (let i = 0; loopRunningRef.current && i < 60; i++) await sleep(100);
+    if (loopRunningRef.current) return;
+    loopRunningRef.current = true;
+    setLoopRunning(true);
+    const epoch = loopEpochRef.current;
+    try {
+      let turn = outcome;
+      for (;;) {
+        const { decision, budget } = decideNextTurn(turn, budgetRef.current);
+        budgetRef.current = budget;
+        setLoopStep(budget.step);
+        if (epoch !== loopEpochRef.current || !autoWorkRef.current) return;
+        if (decision.action === "stop") {
+          setLoopStatus(decision.reason);
+          return;
+        }
+        setLoopNote(decision.delayMs > AUTOLOOP_TURN_PAUSE_MS ? "free-tier rate limit — waiting it out" : null);
+        if (decision.delayMs > 0 && !(await countdown(decision.delayMs, epoch))) return;
+        // Anything the human typed while the loop was waiting goes first.
+        while (thinkingRef.current) {
+          if (epoch !== loopEpochRef.current) return;
+          await sleep(250);
+        }
+        setLoopNote(null);
+        if (epoch !== loopEpochRef.current || !autoWorkRef.current) return;
+        if (activeIdRef.current !== roomId) {
+          cancelAutoWork("you switched rooms — auto-work stopped here; every step it took is saved in that room");
+          return;
+        }
+        turn = toLoopTurn(await performTurn(roomId, continuePrompt(budget.step + 1)));
+      }
+    } finally {
+      loopRunningRef.current = false;
+      setLoopRunning(false);
+      setLoopCountdown(null);
+      setLoopNote(null);
+    }
+  }
+
+  /** Human override, always available (CONSTRAINTS.md 25): stop the loop without losing a word. */
+  function cancelAutoWork(reason: string) {
+    loopEpochRef.current += 1;
+    autoWorkRef.current = false;
+    setAutoWork(false);
+    setLoopCountdown(null);
+    setLoopNote(null);
+    setLoopStatus(reason);
+  }
+
+  function onToggleAutoWork() {
+    if (autoWorkRef.current) {
+      cancelAutoWork("stopped by you — every step it took is already saved");
+      return;
+    }
+    autoWorkRef.current = true;
+    setAutoWork(true);
+    setLoopStatus(null);
+    setLoopStep(0);
+    budgetRef.current = { step: 0, rateWaits: 0, errorRetries: 0 };
+  }
+
+  async function onSend(e: React.FormEvent) {
+    e.preventDefault();
+    const content = draft.trim();
+    if (!content || !activeId || thinking) return;
+    setDraft("");
+    setLoopStatus(null);
+    setLoopStep(0);
+    budgetRef.current = { step: 0, rateWaits: 0, errorRetries: 0 };
+    loopEpochRef.current += 1; // a fresh human task cancels any driver still waiting on the old one
+    const roomId = activeId;
+    const res = await performTurn(roomId, content);
+    // The grant was given before this message, so the AI keeps going on its own from here.
+    if (autoWorkRef.current) void driveLoop(roomId, toLoopTurn(res));
   }
 
   async function onCreateRoom(e: React.FormEvent) {
@@ -318,13 +461,35 @@ export default function ChatPage() {
                   placeholder={activeId ? "Describe the story, a character, a scene… (Enter to send, Shift+Enter for a new line)" : "Create a room first"}
                   className="min-h-[52px] w-full resize-y rounded-xl border border-white/10 bg-[#070A14] px-3 py-2 text-[13px] leading-5 text-white placeholder:text-zinc-500 disabled:opacity-60"
                 />
-                <button
-                  type="submit"
-                  disabled={!activeId || thinking || !draft.trim()}
-                  className="shrink-0 rounded-full bg-[#FF4D5A] px-5 py-2.5 text-[13px] font-semibold text-white shadow-[0_8px_20px_rgba(255,77,90,0.35)] transition hover:bg-[#ff5e6a] disabled:opacity-50"
-                >
-                  {thinking ? "Working…" : "Send"}
-                </button>
+                <div className="flex shrink-0 flex-col items-stretch gap-1.5">
+                  <button
+                    type="submit"
+                    disabled={!activeId || thinking || !draft.trim()}
+                    className="rounded-full bg-[#FF4D5A] px-5 py-2.5 text-[13px] font-semibold text-white shadow-[0_8px_20px_rgba(255,77,90,0.35)] transition hover:bg-[#ff5e6a] disabled:opacity-50"
+                  >
+                    {thinking ? "Working…" : "Send"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onToggleAutoWork}
+                    aria-pressed={autoWork}
+                    title={
+                      autoWork
+                        ? "Auto-work is ON — turn it off to stop after the current step"
+                        : "Let the AI keep working on its own after each answer"
+                    }
+                    className={`flex items-center justify-center gap-1.5 rounded-full border px-4 py-1.5 text-[11px] font-semibold transition ${
+                      autoWork
+                        ? "border-[#3DE0B3]/40 bg-[#3DE0B3]/15 text-[#3DE0B3] hover:bg-[#3DE0B3]/25"
+                        : "border-white/10 bg-white/[0.04] text-[#9AA3C0] hover:bg-white/[0.08]"
+                    }`}
+                  >
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${autoWork ? "animate-pulse bg-[#3DE0B3]" : "bg-[#6B7594]"}`}
+                    />
+                    Auto-work {autoWork ? "ON" : "OFF"}
+                  </button>
+                </div>
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[#6B7594]">
                 <span>
@@ -332,6 +497,36 @@ export default function ChatPage() {
                 </span>
                 {agent?.endpointHost && <span className="font-mono">{agent.endpointHost}</span>}
                 <span>· additive writes only — the agent cannot delete anything</span>
+                {loopRunning ? (
+                  <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[#3DE0B3]">
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#3DE0B3]" />
+                      auto-work · step {Math.min(loopStep + 1, AUTOLOOP_MAX_STEPS)}/{AUTOLOOP_MAX_STEPS}
+                    </span>
+                    {loopNote && loopCountdown !== null && (
+                      <span className="text-[#6B7594]">
+                        {loopNote} — {loopCountdown}s
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => cancelAutoWork("stopped by you — every step it took is already saved")}
+                      className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] font-medium text-[#9AA3C0] hover:bg-white/10"
+                    >
+                      Stop
+                    </button>
+                  </span>
+                ) : (
+                  loopStatus && (
+                    <span className="text-[#9AA3C0]">auto-work ended: {loopStatus}</span>
+                  )
+                )}
+                {!loopRunning && !loopStatus && autoWork && (
+                  <span className="text-[#3DE0B3]">
+                    auto-work armed — the AI keeps working on its own after each answer until it reports
+                    LOOP DONE or reaches {AUTOLOOP_MAX_STEPS} steps
+                  </span>
+                )}
               </div>
             </form>
           </Card>
@@ -401,6 +596,12 @@ export default function ChatPage() {
                 <li>• The agent sees the real store (project, cast, locations, episodes, scenes) at the moment you send.</li>
                 <li>• Its thinking is shown above its answer in its own block, exactly as the model produced it — when the model did not think, no block appears.</li>
                 <li>• It can only ask for additive operations — creating and updating. Deleting is impossible.</li>
+                <li>
+                  • <span className="text-white">Auto-work</span> (next to Send) lets the AI keep working on a task
+                  without you in the middle: it sends itself a continuation after every answer, and stops on its own
+                  LOOP DONE signal, on a {AUTOLOOP_MAX_STEPS}-step cap, or the moment you press Stop. Every step is a
+                  real message in this transcript — you can watch it, and close the tab without losing the work.
+                </li>
                 <li>• Every applied write is shown on the message and written to the audit log, so the store never changes silently.</li>
               </ul>
             </Card>
