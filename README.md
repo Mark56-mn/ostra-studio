@@ -131,6 +131,13 @@ bun --filter @ostra/web build   # apps/web → `next build`
 bun --filter @ostra/api build   # apps/api → `tsc --noEmit` (typecheck only, emits nothing)
 # NOTE: no `run` token. `bun --filter @ostra/web run build` exits 1 under bun 1.4.2 with
 # `Script "run" not found in package "@ostra/web"` — that exact command failed a 2026-10-08 deploy.
+
+# Render START COMMAND (dashboard → Service → Settings → Start Command) must be:
+bun start
+# It resolves to `bun --filter @ostra/api start` → `node --import tsx src/index.ts`.
+# `Yarn start` (capital Y) and `yarn start` both fail on Render's image — yarn is not installed —
+# with `bash: line 1: Yarn: command not found` and exit 127. Verified locally 2026-10-10: `bun start`
+# boots the API (`listening on 0.0.0.0:$PORT`, scheduler enabled).
 ```
 
 ## Workspace layout
