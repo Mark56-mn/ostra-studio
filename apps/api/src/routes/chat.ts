@@ -51,6 +51,13 @@ const DIRECT_HISTORY_LIMIT = 24;
 const MAX_CONTENT_CHARS = 8000;
 const HISTORY_LIMIT = 32;
 const MESSAGES_PAGE_LIMIT = 200;
+/**
+ * Output budget for one chat turn. An agent turn is a JSON envelope carrying full scripts and
+ * narration; at the old 900-token default (2048 with thinking) the envelope was cut off mid-string,
+ * which is exactly what left raw JSON in the transcript. 4096 fits a real turn's reply plus its
+ * action objects without truncation.
+ */
+const AGENT_TURN_MAX_TOKENS = 4096;
 
 type RoomRow = { id: string; project_id: string | null; title: string; created_at: string; updated_at: string };
 
@@ -207,7 +214,7 @@ export async function postMessage(req: Request, res: Response) {
     });
   }
 
-  const call = await callAgent(backend, messages);
+  const call = await callAgent(backend, messages, { maxTokens: AGENT_TURN_MAX_TOKENS });
   if (!call.ok) {
     if (call.code === "RATE_LIMITED") {
       const retryAfterSec = call.retryAfterSec ?? 60;
@@ -403,7 +410,7 @@ export async function sendToAgent(req: Request, res: Response) {
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
   ];
 
-  const call = await callAgent(backend, messages);
+  const call = await callAgent(backend, messages, { maxTokens: AGENT_TURN_MAX_TOKENS });
   if (!call.ok) {
     // The failure is recorded ON the user's message so the transcript shows what really happened.
     await supa.from("chat_messages").update({ error: { code: call.code, reason: call.error } }).eq("id", userMessage.id);

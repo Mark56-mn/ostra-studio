@@ -6,7 +6,10 @@
 //    delete op: chat can never destroy an artifact or a row.
 //  - `parseAgentResponse` is pure. If the model answers with prose instead of the JSON envelope we
 //    keep that prose as the reply and report `parse: "text_fallback"` — we never invent a reply and
-//    never invent actions.
+//    never invent actions. When the envelope is there but JSON.parse rejects it (a missed comma, a
+//    raw newline in a script excerpt, or a cut-off at the token limit) we SALVAGE the model's own
+//    reply and its own action objects and report `parse: "json_salvaged"` — the raw JSON blob is
+//    never shown to the director as if it were the answer.
 //  - Anything the model asks for that is not in the allow-list is reported in `rejected`, so a
 //    dropped request is visible instead of silently ignored.
 //  - `reasoning` is whatever the model actually thought — Qwen3 emits ` thinking…</think>` inline in
@@ -43,7 +46,7 @@ export type AgentAction = {
   data: Record<string, string | number | boolean | null>;
 };
 
-export type AgentParse = "json" | "text_fallback";
+export type AgentParse = "json" | "json_salvaged" | "text_fallback";
 
 // ── Agent-to-agent messages ──────────────────────────────────────────────────
 // In a multi-agent production channel one agent needs to address another ("Script AI asks Image AI
@@ -333,12 +336,160 @@ function jsonCandidates(text: string): string[] {
   return out;
 }
 
+/** Unescape the JSON string escapes a model actually emits; anything else is left verbatim. */
+function unescapeJsonString(raw: string): string {
+  return raw.replace(/\\(u[0-9a-fA-F]{4}|["\\/bfnrt])/g, (match, esc: string) => {
+    const c = esc.charAt(0);
+    if (c === '"') return '"';
+    if (c === "\\") return "\\";
+    if (c === "/") return "/";
+    if (c === "b") return "\b";
+    if (c === "f") return "\f";
+    if (c === "n") return "\n";
+    if (c === "r") return "\r";
+    if (c === "t") return "\t";
+    if (c === "u") {
+      const code = Number.parseInt(esc.slice(1), 16);
+      return Number.isFinite(code) ? String.fromCharCode(code) : match;
+    }
+    return match;
+  });
+}
+
+/** The still-escaped body of the JSON string that starts at `from` (just after its opening quote). */
+function readJsonStringBody(text: string, from: number): string {
+  let out = "";
+  let escaped = false;
+  for (let i = from; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (escaped) {
+      out += `\\${ch}`;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') break;
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * The model's own answer text from an envelope that strict JSON.parse could not accept. Only text the
+ * model really wrote inside the field is returned — never a reconstruction, never a summarised guess.
+ */
+function salvageReplyField(text: string): string | null {
+  for (const key of ["reply", "message", "response", "text"]) {
+    const m = new RegExp(`"${key}"\\s*:\\s*"`).exec(text);
+    if (!m) continue;
+    const value = unescapeJsonString(readJsonStringBody(text, m.index + m[0].length)).trim();
+    if (value) return value;
+  }
+  return null;
+}
+
+/** Split the raw element texts of the array that starts at `from` (just after its opening `[`). */
+function scanArrayElements(text: string, from: number): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let elStart = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = from; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      if (elStart === -1) elStart = i;
+      inString = true;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      if (elStart === -1) elStart = i;
+      depth += 1;
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      if (depth === 0) break; // this array's own closing bracket
+      depth -= 1;
+      if (depth === 0 && elStart !== -1) {
+        out.push(text.slice(elStart, i + 1));
+        elStart = -1;
+      }
+      continue;
+    }
+    if (ch === "," && depth === 0) {
+      if (elStart !== -1) {
+        out.push(text.slice(elStart, i));
+        elStart = -1;
+      }
+      continue;
+    }
+    if (elStart === -1 && ch.trim() !== "") elStart = i;
+  }
+  // An unterminated final element (a response cut off mid-array) is returned as-is so the caller can
+  // try it: a truncated but complete object still parses, an incomplete one is skipped.
+  if (elStart !== -1 && depth === 0) out.push(text.slice(elStart));
+  return out;
+}
+
+/** Every element of `"<key>": [ … ]` at/after `minIndex` that parses on its own. */
+function salvageArrayField(text: string, key: string, minIndex: number): unknown[] {
+  const m = new RegExp(`"${key}"\\s*:\\s*\\[`).exec(text.slice(minIndex));
+  if (!m) return [];
+  const from = minIndex + m.index + m[0].length;
+  const out: unknown[] = [];
+  for (const item of scanArrayElements(text, from)) {
+    try {
+      out.push(JSON.parse(item));
+    } catch {
+      // A single malformed/truncated element is skipped; the rest of the envelope still counts.
+    }
+  }
+  return out;
+}
+
+/**
+ * Recover a JSON envelope that JSON.parse rejected. Models emit envelopes that are complete but miss
+ * a comma, put a raw newline inside a script excerpt, or get cut off at the token limit — in every
+ * case the reply and most of the action objects are intact. Returns null when the answer carries no
+ * envelope, so genuine prose still falls through to `text_fallback` untouched.
+ */
+function salvageEnvelope(text: string): {
+  reply: string;
+  actions: unknown[];
+  messages: unknown[];
+  starts: unknown[];
+} | null {
+  const replyMatch = /"(?:reply|message|response|text)"\s*:\s*"/.exec(text);
+  let from = 0;
+  if (replyMatch) {
+    const bodyStart = replyMatch.index + replyMatch[0].length;
+    // Skip past the reply string so the field scan can never match keys mentioned inside the answer.
+    from = bodyStart + readJsonStringBody(text, bodyStart).length;
+  }
+  const actions = salvageArrayField(text, "actions", from);
+  const messages = salvageArrayField(text, "messages", from);
+  const starts = salvageArrayField(text, "start", from);
+  const reply = salvageReplyField(text) ?? "";
+  if (!reply && actions.length === 0 && messages.length === 0 && starts.length === 0) return null;
+  return { reply, actions, messages, starts };
+}
+
 /**
  * Interpret one raw model answer. Never throws.
  * Thinking is split off FIRST: the strict `{"reply": ..., "actions": [...]}` envelope is looked for
  * only in the answer, so reasoning that happens to contain braces can never be mistaken for the
- * envelope. Falls back to treating the answer as prose (`parse: "text_fallback"`) rather than
- * fabricating a reply or dropping the text.
+ * envelope. If no candidate parses strictly, the envelope is SALVAGED field-by-field
+ * (`parse: "json_salvaged"`) so a missed comma or a cut-off tail does not turn the director's reply
+ * into a wall of raw JSON. Only a genuine prose answer falls back to `parse: "text_fallback"`.
  * `explicitReasoning` is the backend's separate reasoning channel, when it returned one.
  */
 export function parseAgentResponse(raw: string | null | undefined, explicitReasoning?: string | null): AgentReply {
@@ -377,6 +528,25 @@ export function parseAgentResponse(raw: string | null | undefined, explicitReaso
       starts,
     };
   }
+
+  // The answer carried an envelope, but JSON.parse rejected every candidate: a missed comma, a raw
+  // control character inside a string, or a reply cut off at the token limit. Recover the model's own
+  // words and its own action objects instead of dumping the raw JSON at the director. Nothing here is
+  // invented — a field that cannot be read is left out, never guessed.
+  const salvaged = salvageEnvelope(text);
+  if (salvaged) {
+    const { actions, rejected } = normalizeActions(salvaged.actions);
+    return {
+      reply: salvaged.reply.slice(0, AGENT_REPLY_MAX_CHARS),
+      actions,
+      parse: "json_salvaged",
+      rejected,
+      reasoning,
+      messages: normalizeOutboundMessages(salvaged.messages),
+      starts: normalizeStarts(salvaged.starts),
+    };
+  }
+
   return {
     reply: text.trim().slice(0, AGENT_REPLY_MAX_CHARS),
     actions: [],

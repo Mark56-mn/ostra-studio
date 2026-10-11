@@ -32,6 +32,12 @@ import { applyStoreActions, readStoreSnapshot, type AppliedAction } from "./stor
 /** How many channel rows we keep in context and return. */
 const CHANNEL_PAGE_LIMIT = 200;
 
+/**
+ * Output budget for one agent turn. The JSON envelope carries full scripts and narration, so the old
+ * 900-token default (2048 with thinking) truncated it mid-string and left raw JSON in the channel.
+ */
+const AGENT_TURN_MAX_TOKENS = 4096;
+
 export type ChannelRow = {
   id: string;
   room_id: string;
@@ -191,7 +197,7 @@ export async function runAgentTurn(
     },
   ];
 
-  const call = await callAgent(backend, messages);
+  const call = await callAgent(backend, messages, { maxTokens: AGENT_TURN_MAX_TOKENS });
   if (!call.ok) {
     await settleInbox(supa, roomId, agent, "failed", { code: call.code, reason: call.error });
     return {

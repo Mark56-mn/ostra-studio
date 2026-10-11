@@ -946,6 +946,7 @@ function MessageRow({ message, handoffs = [] }: { message: ChatMessage; handoffs
             <span className="rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono">{backend}</span>
             {message.backend?.latencyMs != null && <span>{Math.round(message.backend.latencyMs / 100) / 10}s</span>}
             {message.backend?.parse === "text_fallback" && <span>prose reply (no JSON envelope)</span>}
+            {message.backend?.parse === "json_salvaged" && <span>recovered from an incomplete JSON envelope</span>}
           </div>
         )}
       </div>

@@ -224,3 +224,77 @@ Unverified and stated as such:
   send itself was not exercised against the live API, only typechecked).
 - **Production deploy behaviour:** `freebuff-deploy env set` still refuses until the first deploy is done, so
   a deploy would bake in the sandbox `NEXT_PUBLIC_API_URL`.
+
+---
+
+## Follow-up (2026-10-11) — the AI was answering the director in raw JSON
+
+### F1. Task
+
+The director reported: *"the ai is responding to me in json fix that."* An agent turn must show the agent's
+actual answer, never the JSON envelope it was asked to produce.
+
+### F2. Result
+
+Fixed at the single chokepoint (`parseAgentResponse`), verified against the **real** failing turns read back
+from the live `chat_messages` table. Root cause and evidence:
+
+- The hosted NVIDIA model returns its envelope with **a missed comma**, **a raw newline inside a script
+  excerpt**, or **cut off at the token limit**. Every one of those makes `JSON.parse` throw, so
+  `parseAgentResponse` fell through to `parse: "text_fallback"` and **stored the raw envelope as the reply** —
+  which is exactly what the director saw.
+- Measured on the live room (`4f065558-…`, 50 assistant turns): **14 turns were raw JSON**, all with
+  `parse: "text_fallback"`. Replayed through the new parser: **14/14 now salvage the model's own reply, 0 still
+  show JSON**, and **24 action objects** are recovered that were previously dropped (their store writes never
+  ran). The 36 genuine prose turns are unchanged.
+- Fix: when strict parsing fails, `parseAgentResponse` now **salvages the envelope field-by-field** — it reads
+  the `reply` string with a JSON-escape-aware scanner and parses each `actions` / `messages` / `start` element
+  on its own (a malformed or truncated element is skipped, the rest still count). New `parse` value
+  `"json_salvaged"`. Nothing is invented: an unreadable field is left out, never guessed.
+- Also raised the per-turn output budget to **4096 tokens** (`AGENT_TURN_MAX_TOKENS` in
+  `routes/chat.ts` and `lib/agentChannel.ts`) so the envelope stops being truncated at source. The old default
+  (900 → 2048 with thinking) was smaller than a real script-carrying envelope.
+
+### F3. Files changed (follow-up)
+
+- `packages/shared/src/agent/protocol.ts` — `AgentParse` gains `"json_salvaged"`; new pure helpers
+  `unescapeJsonString`, `readJsonStringBody`, `salvageReplyField`, `scanArrayElements`, `salvageArrayField`,
+  `salvageEnvelope`; `parseAgentResponse` tries salvage before the prose fallback; header/type docs updated.
+- `packages/shared/src/agent/protocol.test.ts` — 5 new cases (missed comma, raw newline, cut-off tail with one
+  complete action, malformed peer `messages`, bare `{` stays prose).
+- `apps/api/src/routes/chat.ts` — `AGENT_TURN_MAX_TOKENS = 4096`; both `callAgent` sites pass it (`postMessage`
+  and `sendToAgent`).
+- `apps/api/src/lib/agentChannel.ts` — same `AGENT_TURN_MAX_TOKENS`; `runAgentTurn`'s `callAgent` passes it.
+- `apps/web/src/lib/chat.ts` — `ChatBackend.parse` union gains `"json_salvaged"`.
+- `apps/web/src/app/chat/page.tsx`, `apps/web/src/app/studio/page.tsx` — truthful badge
+  "recovered from an incomplete JSON envelope" for a salvaged turn.
+
+### F4. Checks (follow-up)
+
+| Command | Result |
+| --- | --- |
+| `bun test packages/shared/src/agent` | 65 pass, 0 fail |
+| `bun test` | **478 pass, 0 fail** across 35 files |
+| `bun --filter @ostra/web typecheck` | exit 0 |
+| `bun --filter @ostra/api build` | exit 0 |
+| live replay (temporary script `tmp-check-salvage.ts`, deleted after) | 14 raw-JSON turns → **14 salvaged, 0 still JSON**, 24 actions recovered; 36 prose turns unchanged |
+
+### F5. Integration status (follow-up)
+
+- **Live `chat_messages` (Supabase, read-only GET)** — **verified.** The failing turns and the parser's output
+  on them were both read from the deployed API.
+- **The fix is not deployed.** The running Render API is still the older release, so the deployed site keeps
+  showing raw JSON until `main` is redeployed. No fix is possible from the browser side.
+- **The new parser has not answered from a live model** — it was exercised on the stored outputs of the real
+  model, which is the next-best evidence short of a redeploy.
+
+### F6. Known issues / next
+
+- **Old raw-JSON rows are not rewritten.** The 14 stored envelopes stay in the transcript until/unless the
+  director clears the room; only new turns are affected. (They are now *rendered* as raw text, as before, since
+  they are simply stored strings.) A one-off backfill of `chat_messages.content` was deliberately **not** done —
+  it would rewrite the director's history and can change prompt context.
+- **Truncation is reduced, not eliminated.** 4096 tokens fits a normal turn; a model that emits an unusually
+  long script can still be cut off — that case now salvages its reply instead of showing JSON.
+- Next: redeploy the API (same prerequisite as §10) and confirm a fresh turn on `/chat` shows prose, with the
+  "recovered from an incomplete JSON envelope" badge only when the envelope really was malformed.

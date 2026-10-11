@@ -31,7 +31,7 @@ export type ChatBackend = {
   model: string;
   endpointHost: string | null;
   latencyMs?: number;
-  parse?: "json" | "text_fallback";
+  parse?: "json" | "json_salvaged" | "text_fallback";
 };
 
 export type AgentCandidate = {

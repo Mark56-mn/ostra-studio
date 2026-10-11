@@ -87,6 +87,55 @@ describe("parseAgentResponse", () => {
       assert.deepEqual(r.actions, []);
     }
   });
+
+  // These shapes are the ones actually seen from the hosted NVIDIA model, read back from the live
+  // `chat_messages` table. Each used to be stored — and shown to the director — as a wall of raw
+  // JSON; each must now surface the model's own words and its own actions.
+  it("salvages a completed envelope that just misses a comma", () => {
+    const r = parseAgentResponse(
+      '{"reply":"Added both scenes.","actions":[{"op":"create_scene","data":{"episode_number":1,"index":0,"title":"First Victim"}} {"op":"create_scene","data":{"episode_number":1,"index":1,"title":"The Spirit"}}]}'
+    );
+    assert.equal(r.parse, "json_salvaged");
+    assert.equal(r.reply, "Added both scenes.");
+    assert.deepEqual(r.actions, [
+      { op: "create_scene", data: { episode_number: 1, index: 0, title: "First Victim" } },
+      { op: "create_scene", data: { episode_number: 1, index: 1, title: "The Spirit" } },
+    ]);
+  });
+
+  it("salvages a reply that contains a raw newline", () => {
+    const r = parseAgentResponse('{"reply":"Episode 1 is set to writing.\nNext we storyboard.","actions":[]}');
+    assert.equal(r.parse, "json_salvaged");
+    assert.equal(r.reply, "Episode 1 is set to writing.\nNext we storyboard.");
+    assert.deepEqual(r.actions, []);
+  });
+
+  it("recovers the reply and the complete actions when the envelope is cut off", () => {
+    const r = parseAgentResponse(
+      '{"reply":"I will add the scene now.","actions":[{"op":"create_scene","data":{"episode_number":2,"index":0,"title":"Prologue"}},{"op":"create_scene","data":{"episode_number":2,"index":1,"title":"Fade'
+    );
+    assert.equal(r.parse, "json_salvaged");
+    assert.equal(r.reply, "I will add the scene now.");
+    assert.deepEqual(r.actions, [
+      { op: "create_scene", data: { episode_number: 2, index: 0, title: "Prologue" } },
+    ]);
+  });
+
+  it("salvages peer messages from a malformed envelope too", () => {
+    const r = parseAgentResponse(
+      '{"reply":"Handing off.","messages":[{"to":"image","kind":"request","content":"redraw Kai"} {"to":"voice","kind":"handoff","content":"read scene 2"}],"actions":[]}'
+    );
+    assert.equal(r.parse, "json_salvaged");
+    assert.equal(r.reply, "Handing off.");
+    assert.deepEqual(r.messages, [
+      { to: "image", kind: "request", content: "redraw Kai" },
+      { to: "voice", kind: "handoff", content: "read scene 2" },
+    ]);
+  });
+
+  it("does not treat a bare brace as an envelope", () => {
+    assert.equal(parseAgentResponse("{").parse, "text_fallback");
+  });
 });
 
 describe("thinking is separated from the answer", () => {

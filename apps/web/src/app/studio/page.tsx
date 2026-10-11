@@ -501,6 +501,7 @@ function ChannelRow({ message }: { message: ChannelMessage }) {
           </span>
           {message.backend.latencyMs != null && <span>{Math.round(message.backend.latencyMs / 100) / 10}s</span>}
           {message.backend.parse === "text_fallback" && <span>prose reply (no JSON envelope)</span>}
+          {message.backend.parse === "json_salvaged" && <span>recovered from an incomplete JSON envelope</span>}
         </div>
       )}
     </div>

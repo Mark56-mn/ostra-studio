@@ -305,8 +305,10 @@ Which real model answers (`apps/api/src/lib/agentRuntime.ts`):
 
 Agent behaviour (`packages/shared/src/agent/protocol.ts`): the model must answer with one JSON object
 `{ "reply": "…", "actions": [ … ] }`. `parseAgentResponse` tolerates fenced JSON, `action`/`arguments`
-aliases and flattened arguments, falls back to treating the whole answer as prose (`parse: "text_fallback"`),
-and reports any op outside the allow-list in `rejected`. The allow-list is **additive only** — there is no
+aliases and flattened arguments, and reports any op outside the allow-list in `rejected`. When the envelope
+is present but `JSON.parse` rejects it — a missed comma, a raw newline inside a string, or a reply cut off at
+the token limit — the reply and its action objects are **salvaged field-by-field** (`parse: "json_salvaged"`)
+rather than shown as raw JSON; only a genuine prose answer falls back to `parse: "text_fallback"`. The allow-list is **additive only** — there is no
 delete op, so chat can never destroy a row or an artifact. Store writes go through the same column
 allow-lists as the REST routes (`apps/api/src/lib/storeActions.ts`) and each success inserts an
 `events` row of type `agent.store_change`.
