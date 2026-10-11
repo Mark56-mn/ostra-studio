@@ -16,11 +16,13 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  AGENT_ALL_KINDS,
   AGENT_CHANNEL_ORDER,
   agentLabel,
   buildAgentChannelPrompt,
   parseAgentResponse,
   type AgentKind,
+  type AgentOutboundMessage,
   type AgentStoreSnapshot,
 } from "@ostra/shared";
 import { callAgent, publicBackend, resolveChannelBackend, type AgentMessage } from "./agentRuntime.js";
@@ -263,6 +265,104 @@ export async function runAgentTurn(
     error: null,
     ...(starts ? { startsRequested: reply.starts, starts } : {}),
   };
+}
+
+/**
+ * Deliver the peer-directed messages of ONE direct-chat turn as REAL work (Phase 5):
+ *
+ *  1. Every message the model actually emitted is persisted as an `agent_messages` row (from/to/
+ *     kind/content/backend), status `sent` — a queued handoff, not a claim of delivery.
+ *  2. Each addressed peer (capped, deduplicated) is then INVOKED for real via `runAgentTurn`, which
+ *     loads the channel — including this handoff in its inbox — calls its genuine backend, persists
+ *     its answer and applies its store writes. Only then is the handoff marked `delivered`.
+ *  3. An offline/unconfigured peer leaves the row `sent` with an honest reason in the result — the
+ *     sender never gets to claim the work was done.
+ *
+ * Recursion is bounded by construction: the receiving agent's own outbound messages are persisted
+ * but NOT auto-delivered (that is what an explicit production round is for), so one chat turn can
+ * never spawn an agent loop.
+ */
+export type HandoffResult = {
+  /** `agent_messages` row id — the durable handle the manager can quote later. */
+  id: string | null;
+  to: string;
+  kind: string;
+  /** `sent` = queued but not invoked (recipient offline or delivery cap); `delivered` = the
+   * recipient was really called with this message in its inbox and answered; `failed` = the call
+   * was attempted and failed (error says why). Never optimistic. */
+  status: "sent" | "delivered" | "failed";
+  /** The receiving agent's actual answer text, when it was invoked. */
+  reply: string | null;
+  error: string | null;
+  backend: Record<string, unknown> | null;
+};
+
+/** How many UNIQUE peers one chat turn may invoke. Bounds cost and latency; the rest stay queued. */
+const MAX_DIRECT_DELIVERIES = 3;
+
+export async function deliverPeerMessages(
+  supa: SupabaseClient,
+  args: {
+    roomId: string;
+    projectId: string | null;
+    from: AgentKind;
+    messages: AgentOutboundMessage[];
+    backendInfo: Record<string, unknown>;
+  }
+): Promise<HandoffResult[]> {
+  const { roomId, projectId, from, messages, backendInfo } = args;
+  const results: HandoffResult[] = [];
+
+  // A message to the director is already the chat reply; a message to yourself is not a handoff.
+  const deliverable = messages.filter((m) => m.to !== "director" && m.to !== from);
+
+  const invoked = new Set<string>();
+  for (const m of deliverable) {
+    const row = await insertChannelMessage(supa, {
+      room_id: roomId,
+      project_id: projectId,
+      from_agent: from,
+      to_agent: m.to,
+      kind: m.kind,
+      content: m.content,
+      payload: {},
+      status: "sent",
+      backend: backendInfo,
+    });
+
+    // Delivery cap reached, or this peer was already invoked this turn: the row stays `sent`
+    // (queued) — honest, and picked up by the next turn or an explicit production round.
+    if (invoked.has(m.to) || invoked.size >= MAX_DIRECT_DELIVERIES || !AGENT_ALL_KINDS.includes(m.to as AgentKind)) {
+      results.push({
+        id: row?.id ?? null,
+        to: m.to,
+        kind: m.kind,
+        status: "sent",
+        reply: null,
+        error:
+          invoked.has(m.to) || invoked.size >= MAX_DIRECT_DELIVERIES
+            ? null
+            : `"${m.to}" is not an invocable agent in this channel`,
+        backend: null,
+      });
+      continue;
+    }
+
+    invoked.add(m.to);
+    // The real invocation: this agent's genuine backend is called WITH the handoff in its inbox.
+    const turn = await runAgentTurn(supa, { roomId, projectId, agent: m.to as AgentKind });
+    results.push({
+      id: row?.id ?? null,
+      to: m.to,
+      kind: m.kind,
+      status: turn.ok ? "delivered" : turn.backend ? "failed" : "sent",
+      reply: turn.reply,
+      error: turn.error,
+      backend: turn.backend,
+    });
+  }
+
+  return results;
 }
 
 /**

@@ -6,11 +6,20 @@ import {
   actionTone,
   backendLabel,
   formatClock,
+  handoffSentence,
   mergeMessages,
   reasoningWords,
+  targetStatusLabel,
   type AppliedAction,
   type ChatMessage,
+  type DirectTarget,
+  type Handoff,
 } from "./chat.js";
+
+/** The label lookup the page passes in — the canonical shared roster labels. */
+const labelFor = (kind: string): string =>
+  ({ manager: "Management Team", script: "Script AI", image: "Image AI", voice: "Voice AI", overseer: "Showrunner" })[kind] ??
+  kind;
 
 function message(id: string, createdAt: string, content = id, role: "user" | "assistant" = "assistant"): ChatMessage {
   return {
@@ -117,5 +126,42 @@ describe("reasoningWords", () => {
 describe("formatClock", () => {
   it("returns an empty string for an unparseable timestamp", () => {
     assert.equal(formatClock("nope"), "");
+  });
+});
+
+describe("targetStatusLabel", () => {
+  function target(available: boolean): DirectTarget {
+    return { available } as DirectTarget;
+  }
+
+  it("only says ready when the backend says the agent can answer", () => {
+    assert.deepEqual(targetStatusLabel(target(true)), { text: "ready to answer", tone: "ok" });
+    assert.deepEqual(targetStatusLabel(target(false)), { text: "cannot answer right now", tone: "bad" });
+  });
+});
+
+describe("handoffSentence", () => {
+  const base: Handoff = { id: "m1", to: "image", kind: "request", status: "sent", reply: null, error: null, backend: null };
+
+  it("reports the peer's real answer when it was actually invoked", () => {
+    const s = handoffSentence({ ...base, status: "delivered", reply: "Gave Kai the scar." }, labelFor);
+    assert.match(s, /Image AI was asked and answered/);
+    assert.match(s, /Gave Kai the scar\./);
+  });
+
+  it("never claims a queued message was delivered", () => {
+    const s = handoffSentence(base, labelFor);
+    assert.match(s, /Queued for Image AI — not invoked yet\./);
+    assert.doesNotMatch(s, /answered/);
+  });
+
+  it("says a message was not called when the recipient is not an agent", () => {
+    const s = handoffSentence({ ...base, error: '"nobody" is not an invocable agent in this channel' }, labelFor);
+    assert.match(s, /Image AI was not called — "nobody" is not an invocable agent/);
+  });
+
+  it("shows the real failure reason instead of a silent drop", () => {
+    const s = handoffSentence({ ...base, status: "failed", error: "429 rate limited" }, labelFor);
+    assert.match(s, /Image AI was asked, but the call failed — 429 rate limited/);
   });
 });

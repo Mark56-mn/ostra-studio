@@ -21,28 +21,60 @@ import {
   createRoom,
   fetchStore,
   formatClock,
+  handoffSentence,
+  listConversation,
   listMessages,
   listRooms,
+  listTargets,
   mergeMessages,
   patchRoom,
-  sendMessage,
+  sendTurn,
+  targetStatusLabel,
+  type AgentKind,
   type AgentStatus,
+  type ChannelEntry,
   type ChatBackend,
   type ChatMessage,
   type ChatRoom,
+  type DirectSendResult,
+  type DirectTarget,
+  type Handoff,
   type ProjectRef,
-  type SendResult,
   type StoreSnapshot,
 } from "@/lib/chat";
+import { agentLabel } from "@/lib/agents";
 
 const POLL_MESSAGES_MS = 3000;
 const POLL_STORE_MS = 6000;
+
+/**
+ * A per-send idempotency id: if the browser retries the POST (double tap, flaky tunnel) the backend
+ * returns the FIRST turn instead of calling the model twice. Optional by design — when the platform
+ * has no `crypto.randomUUID`, the turn is sent without it rather than faked.
+ */
+function newClientId(): string | undefined {
+  try {
+    return globalThis.crypto?.randomUUID?.();
+  } catch {
+    return undefined;
+  }
+}
 
 export default function ChatPage() {
   const [rooms, setRooms] = useState<ChatRoom[] | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [agent, setAgent] = useState<AgentStatus | null>(null);
+  // DIRECT AGENT CHAT — which canonical agent this room is talking to right now, its real live
+  // status, and the agent-to-agent channel rows the backend returned for the room.
+  const [targets, setTargets] = useState<DirectTarget[] | null>(null);
+  const [targetKind, setTargetKind] = useState<AgentKind>("script");
+  /** True when the live backend predates the direct-chat routes (not redeployed yet). The page then
+   *  keeps working on the original single-agent endpoint — honestly, and without inventing a target. */
+  const [legacyApi, setLegacyApi] = useState(false);
+  const [channel, setChannel] = useState<ChannelEntry[]>([]);
+  /** Real handoffs of one turn, keyed by the assistant message they belong to. Never optimistic. */
+  const [handoffs, setHandoffs] = useState<Record<string, Handoff[]>>({});
   const [projects, setProjects] = useState<ProjectRef[]>([]);
   const [snapshot, setSnapshot] = useState<StoreSnapshot | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -69,9 +101,14 @@ export default function ChatPage() {
   const budgetRef = useRef<LoopBudget>({ step: 0, rateWaits: 0, errorRetries: 0 });
   const projectIdRef = useRef<string | null>(null);
   const activeIdRef = useRef<string | null>(null);
+  // A loop driver or a slow turn holds one render's closures, so the chosen agent is mirrored into a
+  // ref: a turn always goes to the agent the operator had selected, never to a stale one.
+  const targetKindRef = useRef<AgentKind>("script");
+  const legacyApiRef = useRef(false);
 
   const activeRoom = useMemo(() => rooms?.find((r) => r.id === activeId) ?? null, [rooms, activeId]);
   const projectId = activeRoom?.project_id ?? null;
+  const selectedTarget = useMemo(() => targets?.find((t) => t.kind === targetKind) ?? null, [targets, targetKind]);
 
   const refreshRooms = useCallback(async () => {
     const r = await listRooms();
@@ -111,38 +148,92 @@ export default function ChatPage() {
     activeIdRef.current = activeId;
   }, [activeId]);
 
-  // Transcript for the active room.
-  const loadTranscript = useCallback(async (roomId: string) => {
-    const r = await listMessages(roomId);
-    if (!r.ok) {
-      setErr(r.error);
-      return;
-    }
-    setErr(null);
-    setMessages(r.data.messages);
-    if (r.data.agent) setAgent(r.data.agent);
+  useEffect(() => {
+    targetKindRef.current = targetKind;
+  }, [targetKind]);
+
+  useEffect(() => {
+    legacyApiRef.current = legacyApi;
+  }, [legacyApi]);
+
+  // The five canonical agents this room can talk to, each with its REAL live availability.
+  const refreshTargets = useCallback(async (roomId: string) => {
+    const r = await listTargets(roomId);
+    if (r.ok) setTargets(r.data.targets);
   }, []);
+
+  /**
+   * The conversation with ONE chosen agent. History is stored per target, so this can never show
+   * another agent's messages under this agent's name.
+   *
+   * If the backend has not been redeployed with the direct-chat routes yet, the original
+   * single-agent transcript is fetched instead (it is still served) and `legacy` says so — the page
+   * stays usable rather than failing on a live app whose API is one release behind.
+   */
+  const fetchConversation = useCallback(
+    async (roomId: string, kind: AgentKind): Promise<
+      | { ok: true; messages: ChatMessage[]; agent: AgentStatus | null; channel: ChannelEntry[]; legacy: boolean }
+      | { ok: false; error: string }
+    > => {
+      const r = await listConversation(roomId, kind);
+      if (r.ok) {
+        return { ok: true, messages: r.data.messages, agent: r.data.agent, channel: r.data.channel, legacy: false };
+      }
+      const old = await listMessages(roomId);
+      if (old.ok) {
+        return { ok: true, messages: old.data.messages, agent: old.data.agent, channel: [], legacy: true };
+      }
+      return { ok: false, error: r.error };
+    },
+    []
+  );
+
+  const loadConversation = useCallback(
+    async (roomId: string, kind: AgentKind) => {
+      const r = await fetchConversation(roomId, kind);
+      if (!r.ok) {
+        setErr(r.error);
+        return;
+      }
+      setErr(null);
+      setLegacyApi(r.legacy);
+      setMessages(r.messages);
+      setChannel(r.channel);
+      if (r.agent) setAgent(r.agent);
+    },
+    [fetchConversation]
+  );
 
   useEffect(() => {
     if (!activeId) {
       setMessages([]);
+      setChannel([]);
+      setTargets(null);
       return;
     }
-    void loadTranscript(activeId);
-  }, [activeId, loadTranscript]);
+    // Switching agent or room swaps the conversation: clear the old transcript rather than risk
+    // showing one agent's lines while the other's are still loading.
+    setMessages([]);
+    setChannel([]);
+    setHandoffs({});
+    void loadConversation(activeId, targetKind);
+    void refreshTargets(activeId);
+  }, [activeId, targetKind, loadConversation, refreshTargets]);
 
   // Live transcript: anything the agent (or another tab) writes shows up without a reload.
   useEffect(() => {
     if (!activeId) return;
     const iv = setInterval(async () => {
       if (thinkingRef.current) return;
-      const r = await listMessages(activeId);
+      const r = await fetchConversation(activeId, targetKind);
       if (!r.ok) return;
-      setMessages((prev) => mergeMessages(prev, r.data.messages));
-      if (r.data.agent) setAgent(r.data.agent);
+      setLegacyApi(r.legacy);
+      setMessages((prev) => mergeMessages(prev, r.messages));
+      setChannel(r.channel);
+      if (r.agent) setAgent(r.agent);
     }, POLL_MESSAGES_MS);
     return () => clearInterval(iv);
-  }, [activeId]);
+  }, [activeId, targetKind, fetchConversation]);
 
   // Live store: the panel re-reads the real tables while the agent works.
   useEffect(() => {
@@ -165,19 +256,30 @@ export default function ChatPage() {
   }, [messages.length, thinking]);
 
   // ── one real turn ────────────────────────────────────────────────────────
-  // Persist the message, call the model, apply the store writes, update the panels — and hand the
-  // backend's REAL result back so the caller (a human, or the auto-work loop) can decide next.
-  async function performTurn(roomId: string, content: string): Promise<SendResult> {
+  // Persist the message, call the chosen agent's REAL backend, apply its store writes, deliver any
+  // peer handoffs, update the panels — and hand the backend's REAL result back so the caller (a
+  // human, or the auto-work loop) can decide next.
+  async function performTurn(roomId: string, content: string): Promise<DirectSendResult> {
+    const target = targetKindRef.current;
     setErr(null);
     setLastTurn(null);
     setElapsed(0);
     setThinking(true);
     thinkingRef.current = true;
     try {
-      const res = await sendMessage(roomId, content);
+      const res = await sendTurn(roomId, {
+        target,
+        content,
+        clientMsgId: newClientId(),
+        legacy: legacyApiRef.current,
+      });
       if (res.ok) {
         setMessages((prev) => mergeMessages(prev, [res.data.user_message, res.data.message]));
         setAgent(res.data.agent);
+        if (res.data.handoffs?.length > 0) {
+          const messageId = res.data.message.id;
+          setHandoffs((prev) => ({ ...prev, [messageId]: res.data.handoffs }));
+        }
         setLastTurn({
           applied: res.data.store.changed,
           failed: res.data.store.failed,
@@ -197,6 +299,7 @@ export default function ChatPage() {
           }
         }
         await refreshStore(nextProjectId);
+        await refreshTargets(roomId);
         await refreshRooms();
       } else {
         if (res.userMessage) setMessages((prev) => mergeMessages(prev, [res.userMessage as ChatMessage]));
@@ -343,6 +446,7 @@ export default function ChatPage() {
 
   const online = agent?.available === true;
   const isProjectModel = agent?.kind === "project_worker";
+  const targetLabel = selectedTarget?.label ?? agentLabel(targetKind);
 
   return (
     <div className="min-h-screen bg-[#070A14]">
@@ -365,12 +469,12 @@ export default function ChatPage() {
               </Badge>
             ) : online ? (
               <Badge variant={isProjectModel ? "online" : "warn"} dot>
-                {isProjectModel ? "SCRIPT AI ONLINE" : "HOSTED FALLBACK"}
+                {targetLabel.toUpperCase()} {isProjectModel ? "ONLINE" : "VIA HOSTED BACKEND"}
                 {agent.model ? ` · ${agent.model}` : ""}
               </Badge>
             ) : (
               <Badge variant="offline" dot>
-                NO MODEL ONLINE
+                {targetLabel.toUpperCase()} CANNOT ANSWER
               </Badge>
             )}
             {agent && (
@@ -387,9 +491,10 @@ export default function ChatPage() {
 
         {!online && agent && (
           <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-[13px] leading-5 text-amber-200">
-            <span className="font-semibold">NO AI IS AVAILABLE TO ANSWER.</span> Nothing is simulated — your message is
-            still saved, and a real answer needs either the Script AI runtime ONLINE (start it from{" "}
-            <span className="font-mono text-[12px]">/runtimes</span>) or a hosted fallback key configured on the backend.
+            <span className="font-semibold">NO {targetLabel.toUpperCase()} CAN ANSWER RIGHT NOW.</span> Nothing is
+            simulated — your message is still saved, and a real answer needs that agent&apos;s runtime ONLINE (start
+            it from <span className="font-mono text-[12px]">/runtimes</span>) or a hosted model configured on the
+            backend. Pick another agent above to talk to someone who is online.
             {agent.candidates.length > 0 && (
               <ul className="mt-2 space-y-1 font-mono text-[11px] text-amber-300/90">
                 {agent.candidates.map((c, i) => (
@@ -400,6 +505,47 @@ export default function ChatPage() {
                 ))}
               </ul>
             )}
+          </div>
+        )}
+
+        {legacyApi && (
+          <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-[12px] leading-5 text-amber-200">
+            <span className="font-semibold">ONE AGENT PER CONVERSATION IS NOT LIVE YET.</span> This page is talking to the
+            Script AI through the original endpoint because the backend has not been redeployed with the per-agent
+            routes. The selector appears as soon as the API on Render runs this build — nothing is faked in the
+            meantime.
+          </div>
+        )}
+
+        {targets && targets.length > 0 && (
+          <div className="rounded-xl border border-white/[0.07] bg-[#131A32]/70 px-4 py-3">
+            <div className="label-mono mb-2 text-[#6B7594]">
+              TALKING TO — one conversation per agent, each kept separately
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {targets.map((t) => {
+                const active = t.kind === targetKind;
+                return (
+                  <button
+                    key={t.kind}
+                    type="button"
+                    onClick={() => setTargetKind(t.kind)}
+                    aria-pressed={active}
+                    title={`${t.subtitle} — ${t.detail}`}
+                    className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-left transition ${
+                      active ? "border-white/25 bg-white/[0.12]" : "border-white/[0.08] bg-white/[0.03] hover:bg-white/[0.07]"
+                    }`}
+                  >
+                    <span
+                      aria-hidden
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${t.available ? "bg-emerald-400" : "bg-rose-400"}`}
+                    />
+                    <span className={`text-[12px] font-semibold ${active ? "text-white" : t.accent}`}>{t.label}</span>
+                    <span className="font-mono text-[10px] text-[#6B7594]">{targetStatusLabel(t).text}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         )}
 
@@ -419,23 +565,28 @@ export default function ChatPage() {
             <div className="border-b border-white/[0.06] px-4 py-3">
               <div className="label-mono text-[#6B7594]">{activeRoom ? "ROOM" : "NO ROOM SELECTED"}</div>
               <div className="text-[15px] font-semibold text-white">{activeRoom?.title ?? "Create a room to begin"}</div>
+              {selectedTarget && (
+                <div className="mt-1 text-[11px] leading-4 text-[#6B7594]">
+                  Talking to <span className="text-[#9AA3C0]">{selectedTarget.label}</span> — {selectedTarget.subtitle}
+                </div>
+              )}
             </div>
 
             <div ref={scrollerRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4" style={{ maxHeight: "56vh" }}>
               {messages.length === 0 && !thinking && (
                 <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-[13px] leading-6 text-[#6B7594]">
-                  No messages yet. Try: <span className="text-white">“I want a story about a calligrapher whose ink
-                  rewrites reality — set up the project, the two leads and episode one.”</span>
+                  Nothing said to {targetLabel} yet — this is its own conversation. Try:{" "}
+                  <span className="text-white">“I want a story about a calligrapher whose ink rewrites reality — set
+                  up the project, the two leads and episode one.”</span>
                 </div>
               )}
               {messages.map((m) => (
-                <MessageRow key={m.id} message={m} />
+                <MessageRow key={m.id} message={m} handoffs={handoffs[m.id] ?? []} />
               ))}
               {thinking && (
                 <div className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.03] px-4 py-3 text-[12px] text-[#9AA3C0]">
                   <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#3DE0B3]" />
-                  {agent?.kind === "project_worker" ? "Script AI" : agent?.kind === "hosted_nvidia" ? "NVIDIA backup" : "Fallback model"} is
-                  thinking… {elapsed}s
+                  {targetLabel} is thinking… {elapsed}s
                   {elapsed > 20 && (
                     <span className="text-[#6B7594]">
                       (a small model on a tunnel can take a while — its thinking appears with the answer)
@@ -458,7 +609,11 @@ export default function ChatPage() {
                   }}
                   rows={2}
                   disabled={!activeId || thinking}
-                  placeholder={activeId ? "Describe the story, a character, a scene… (Enter to send, Shift+Enter for a new line)" : "Create a room first"}
+                  placeholder={
+                    activeId
+                      ? `Message ${targetLabel}… (Enter to send, Shift+Enter for a new line)`
+                      : "Create a room first"
+                  }
                   className="min-h-[52px] w-full resize-y rounded-xl border border-white/10 bg-[#070A14] px-3 py-2 text-[13px] leading-5 text-white placeholder:text-zinc-500 disabled:opacity-60"
                 />
                 <div className="flex shrink-0 flex-col items-stretch gap-1.5">
@@ -493,7 +648,8 @@ export default function ChatPage() {
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[#6B7594]">
                 <span>
-                  Model: <span className="text-zinc-300">{agent?.model ?? (agent === null ? "checking…" : "none online")}</span>
+                  {targetLabel} model:{" "}
+                  <span className="text-zinc-300">{agent?.model ?? (agent === null ? "checking…" : "none online")}</span>
                 </span>
                 {agent?.endpointHost && <span className="font-mono">{agent.endpointHost}</span>}
                 <span>· additive writes only — the agent cannot delete anything</span>
@@ -592,7 +748,9 @@ export default function ChatPage() {
             <Card>
               <div className="label-mono mb-2 text-[#6B7594]">HOW THIS WORKS</div>
               <ul className="space-y-2 text-[12px] leading-5 text-[#9AA3C0]">
-                <li>• Your message goes to the Script AI worker this app actually runs; if none is ONLINE the backend says so instead of inventing an answer.</li>
+                <li>• <span className="text-white">TALKING TO</span> chooses the agent this message goes to: Management Team, Script AI, Image AI, Voice AI or Showrunner. Each keeps its own conversation, so switching never mixes one agent&apos;s words with another&apos;s.</li>
+                <li>• Your message goes to that agent&apos;s real backend. If it cannot answer, the backend says so instead of inventing a reply — the selector shows each agent&apos;s live availability before you type.</li>
+                <li>• When an agent asks a peer to do something, that request is stored in the real channel and the peer is actually called when it is online — its answer appears under the message. A request that could not be delivered is shown as queued, never as done.</li>
                 <li>• The agent sees the real store (project, cast, locations, episodes, scenes) at the moment you send.</li>
                 <li>• Its thinking is shown above its answer in its own block, exactly as the model produced it — when the model did not think, no block appears.</li>
                 <li>• It can only ask for additive operations — creating and updating. Deleting is impossible.</li>
@@ -690,6 +848,35 @@ export default function ChatPage() {
                 <span className="font-mono text-[11px] text-white">/projects</span> to see what the agent wrote.
               </div>
             </Card>
+
+            {/* The real inter-agent channel for this room: what one agent actually sent another, and
+                whether the recipient was really invoked. Stored rows, not a summary. */}
+            <Card>
+              <div className="label-mono mb-2 text-[#6B7594]">AGENT CHANNEL · REAL DELIVERIES</div>
+              {channel.length === 0 ? (
+                <div className="text-[12px] leading-5 text-[#6B7594]">
+                  No agent-to-agent messages in this room yet. When a message you send makes an agent ask a
+                  peer for something, the real request and the peer&apos;s real answer appear here.
+                </div>
+              ) : (
+                <ul className="max-h-[38vh] space-y-1.5 overflow-y-auto pr-1">
+                  {channel
+                    .slice(-10)
+                    .reverse()
+                    .map((m) => (
+                      <li key={m.id} className="rounded-lg border border-white/[0.06] bg-white/[0.03] px-2.5 py-2">
+                        <div className="flex items-center justify-between gap-2 font-mono text-[10px] text-[#6B7594]">
+                          <span>
+                            {agentLabel(m.from_agent)} → {agentLabel(m.to_agent)}
+                          </span>
+                          <span>{m.status}</span>
+                        </div>
+                        <p className="mt-0.5 line-clamp-3 text-[11px] leading-4 text-[#C2CBE6]">{m.content}</p>
+                      </li>
+                    ))}
+                </ul>
+              )}
+            </Card>
           </div>
         </div>
       </main>
@@ -697,9 +884,11 @@ export default function ChatPage() {
   );
 }
 
-function MessageRow({ message }: { message: ChatMessage }) {
+function MessageRow({ message, handoffs = [] }: { message: ChatMessage; handoffs?: Handoff[] }) {
   const mine = message.role === "user";
   const backend = backendLabel(message.backend);
+  // The agent that owns this row. Legacy rows carry no kind; they were all Script AI turns.
+  const speaker = agentLabel(message.target_kind ?? "script");
   return (
     <div className={`flex ${mine ? "justify-end" : "justify-start"}`}>
       <div
@@ -708,7 +897,7 @@ function MessageRow({ message }: { message: ChatMessage }) {
         }`}
       >
         <div className="mb-1 flex items-center gap-2">
-          <span className="label-mono text-[#6B7594]">{mine ? "DIRECTOR" : "SCRIPT AI"}</span>
+          <span className="label-mono text-[#6B7594]">{mine ? "DIRECTOR" : speaker.toUpperCase()}</span>
           <span className="text-[10px] text-[#6B7594]">{formatClock(message.created_at)}</span>
         </div>
 
@@ -729,6 +918,24 @@ function MessageRow({ message }: { message: ChatMessage }) {
               >
                 <span aria-hidden>{actionTone(a) === "ok" ? "✓" : "✗"}</span>
                 <span>{actionLabel(a)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/* What this agent asked its peers, and what really came back. `queued` is shown as queued:
+            the peer was NOT called, and the UI must never imply that it was. */}
+        {handoffs.length > 0 && (
+          <ul className="mt-2 space-y-1 border-t border-white/[0.06] pt-2">
+            {handoffs.map((h, i) => (
+              <li
+                key={`${h.id ?? h.to}-${i}`}
+                className={`text-[11px] leading-4 ${
+                  h.status === "delivered" ? "text-emerald-300" : h.status === "failed" ? "text-red-300" : "text-amber-300"
+                }`}
+              >
+                <span aria-hidden>↳ </span>
+                {handoffSentence(h, agentLabel)}
               </li>
             ))}
           </ul>

@@ -17,7 +17,17 @@ import { listLocations, createLocation, patchLocation, deleteLocation } from "./
 import { listArtifacts, createArtifact } from "./routes/artifacts.js";
 import { listSchedules, createSchedule, getSchedule, patchSchedule, deleteSchedule, seedDefaultSchedules } from "./routes/schedules.js";
 import { schedulerTickHandler, runNowHandler, listStartupHistory } from "./routes/runtime.js";
-import { listRooms, createRoom, patchRoom, listMessages, postMessage, getStore } from "./routes/chat.js";
+import {
+  listRooms,
+  createRoom,
+  patchRoom,
+  listMessages,
+  postMessage,
+  listTargets,
+  sendToAgent,
+  listConversation,
+  getStore,
+} from "./routes/chat.js";
 import {
   listSeasons,
   createSeason,
@@ -146,6 +156,10 @@ app.post("/api/chat/rooms", createRoom);
 app.patch("/api/chat/rooms/:id", patchRoom);
 app.get("/api/chat/rooms/:id/messages", listMessages);
 app.post("/api/chat/rooms/:id/messages", postMessage);
+// Direct agent chat — one room, five canonical agents, history kept per `target_kind`.
+app.get("/api/chat/rooms/:id/targets", listTargets);
+app.post("/api/chat/rooms/:id/message", sendToAgent);
+app.get("/api/chat/rooms/:id/conversation/:kind", listConversation);
 app.get("/api/chat/store", getStore);
 
 // AI Studio — agents talking to each other, with the Showrunner reporting to the director

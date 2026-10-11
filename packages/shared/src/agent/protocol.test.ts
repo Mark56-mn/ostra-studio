@@ -198,6 +198,11 @@ describe("buildAgentSystemPrompt", () => {
     assert.match(buildAgentSystemPrompt(snapshot), /reason as much as you need inside/);
   });
 
+  it("lists the new season ops", () => {
+    assert.match(buildAgentSystemPrompt(snapshot), /create_season/);
+    assert.match(buildAgentSystemPrompt(snapshot), /submit_season/);
+  });
+
   it("adds the room note when one is set", () => {
     assert.match(buildAgentSystemPrompt(snapshot, "Keep it PG."), /DIRECTOR NOTE FOR THIS ROOM: Keep it PG\./);
     assert.doesNotMatch(buildAgentSystemPrompt(snapshot, null), /DIRECTOR NOTE/);

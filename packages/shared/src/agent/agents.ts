@@ -275,3 +275,132 @@ export function buildAgentChannelPrompt(args: {
     .filter((line, i, arr) => !(line === "" && arr[i - 1] === ""))
     .join("\n");
 }
+
+// ── Direct-chat selection helpers ────────────────────────────────────────────
+// Selection uses the canonical shared kind id. The displayed answer source must come from the backend
+// that actually answered (provider/model/worker), never from this roster's default labels. Some roles
+// may answer from the same hosted model with different instructions — the UI must say so honestly.
+
+/** The five canonical targets a human can open a direct conversation with, in selection order. */
+export const DIRECT_CHAT_TARGETS = [
+  {
+    kind: "manager",
+    label: "Management Team",
+    subtitle: "Plan the work, brief the agents, and report what is blocking or needs your decision.",
+  },
+  {
+    kind: "script",
+    label: "Script AI",
+    subtitle: "Story, episodes, scenes, dialogue and continuity.",
+  },
+  {
+    kind: "image",
+    label: "Image AI",
+    subtitle: "Characters, scene composition and visual consistency.",
+  },
+  {
+    kind: "voice",
+    label: "Voice AI",
+    subtitle: "Narration, pacing and dialogue timing.",
+  },
+  {
+    kind: "overseer",
+    label: "Showrunner",
+    subtitle: "Oversight, conflict detection and status reporting.",
+  },
+] as const;
+
+/**
+ * One line naming the backend that ACTUALLY answered a turn. Built from the live backend record the
+ * API returned for that turn — never from the roster's default model names.
+ */
+export function answerSourceLabel(backend: {
+  kind: string;
+  provider: string;
+  model: string;
+  workerType?: string | null;
+}): string {
+  if (backend.kind === "project_worker") {
+    return backend.workerType && backend.workerType !== backend.provider
+      ? `${backend.provider} · ${backend.workerType} worker`
+      : `${backend.provider} · project worker`;
+  }
+  if (backend.kind === "hosted_nvidia") return `NVIDIA NIM · ${backend.model}`;
+  if (backend.kind === "hosted_manager") return `${backend.provider} · management team`;
+  if (backend.kind === "hosted_fallback") return `${backend.provider} · hosted fallback`;
+  return `${backend.provider} · ${backend.model}`;
+}
+
+/**
+ * Non-null when several roles share one hosted model and only their instructions differ. The UI shows
+ * this instead of pretending the roles are separate models.
+ */
+export function sharedModelNote(backend: { kind: string; provider: string; model: string }): string | null {
+  if (backend.kind === "hosted_nvidia" || backend.kind === "hosted_manager" || backend.kind === "hosted_fallback") {
+    return "Shared hosted model, role-specific instructions.";
+  }
+  return null;
+}
+
+/**
+ * The system prompt for a DIRECT conversation between the human director and one chosen agent. It is
+ * the same role identity, envelope and action allow-list as the production channel, minus the channel
+ * transcript (the per-target chat history travels as ordinary user/assistant messages instead).
+ * The manager keeps its `messages` peer array so a handoff it makes in chat is a real, deliverable
+ * message — not a promise in prose.
+ */
+export function buildDirectChatPrompt(args: {
+  agent: AgentKind;
+  snapshot: AgentStoreSnapshot | null;
+  directorNote?: string | null;
+}): string {
+  const { agent, snapshot, directorNote } = args;
+  const profile = agentProfile(agent);
+  const others = AGENT_ALL_KINDS.filter((k) => k !== agent).map(agentLabel);
+
+  const rules =
+    agent === "manager"
+      ? [
+          "You are the Management Team: you direct the production agents, you do not write the episodes yourself.",
+          "`reply` is your message to the human director: answer their question, state the plan, the priorities and the honest status. 2-8 sentences unless they asked for detail.",
+          "When you need another agent to do something, put it in `messages`, addressed by name: Script AI, Image AI, Voice AI, Showrunner. Use kind `instruction` when directing, `brief` when handing over work, `request` when you need something back. The server DELIVERS that message to the agent and records its real answer — never claim an agent did work you have not seen come back.",
+          "Plan store changes in `actions` (create_project, create_season, submit_season, create_episode, create_scene, create_character, update_episode …). Plan only what you actually intend to produce; never invent finished work.",
+          "Put a worker type in `start` ONLY when that agent is currently offline and you need it running. The server checks whether it may be started and reports the real result.",
+          "Ask the director for approval when a decision is genuinely theirs (a season package, a rejected outline, spending quota). Never approve on their behalf.",
+        ]
+      : agent === "overseer"
+        ? [
+            "You are the Showrunner: do NOT write story, art or audio yourself and do NOT request store changes unless a fix is genuinely missing.",
+            "Answer the director's question from the store context. Report what is done, what is blocked and what is unowned.",
+            "Use `messages` only to ask a specific agent to resolve a specific conflict. Use `reply` for the director's report.",
+            "Never claim an agent finished work that is not visible in the store context. If you cannot tell, say so.",
+          ]
+        : [
+            `You are the ${profile.label} of Ostra Studio, talking ONE-TO-ONE with the human director.`,
+            "`reply` is your answer to the director. Be concrete and brief (2-6 sentences unless they asked for detail). Write in the director's language.",
+            "Put EVERY store change in `actions`. Never claim in `reply` that something was saved unless the matching action is present.",
+            "You may address another agent with `messages` when you genuinely need them — one entry per peer, addressed by name (they are: " + others.join(", ") + ").",
+            "Never invent characters, episodes, scene facts or art that are not in the store context or in this conversation.",
+            "You cannot delete anything and you must not promise that you did.",
+          ];
+
+  return [
+    profile.promptRole,
+    "",
+    "You are in a PRIVATE conversation with the human director of Ostra Studio. The conversation history with you follows this prompt as ordinary messages.",
+    "Answer with EXACTLY ONE JSON object and nothing else — no markdown fence, no commentary:",
+    '{"reply": "<your answer to the director>", "messages": [{"to": "<agent>", "kind": "request|handoff|position|ack|instruction", "content": "<what they must know or do>"}], "actions": [ <zero or more action objects> ], "start": [ "<worker_type you need started>" ]}',
+    "",
+    "Rules:",
+    ...rules.map((r) => `- ${r}`),
+    "- You may reason as much as you need inside  thinking…<>. The reasoning is shown separately, so put the JSON object AFTER  thinking…<> and nothing after it.",
+    "",
+    AGENT_ACTION_REFERENCE,
+    "",
+    directorNote ? `DIRECTOR NOTE FOR THIS ROOM: ${directorNote}` : "",
+    "",
+    renderStoreContext(snapshot),
+  ]
+    .filter((line, i, arr) => !(line === "" && arr[i - 1] === ""))
+    .join("\n");
+}

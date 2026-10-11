@@ -99,8 +99,8 @@ bun install
 
 # --- Supabase (once) ---
 # 1) Create project at https://supabase.com
-# 2) Run EVERY migration in order in the SQL editor (001 → 009 — migrations are additive/idempotent):
-#    supabase/migrations/001_initial.sql … 009_provider_routing.sql
+# 2) Run EVERY migration in order in the SQL editor (001 → 012 — migrations are additive/idempotent):
+#    supabase/migrations/001_initial.sql … 012_chat_targets.sql
 # 3) Create Storage bucket `ostra-assets`
 
 # --- Render env (apps/api — secrets live here only) ---
@@ -163,6 +163,9 @@ supabase/migrations/006_chat_reasoning.sql  # + chat_messages.reasoning (model t
 supabase/migrations/007_agent_channel.sql  # AI Studio agent-to-agent channel (/api/agents/*, /studio)
 supabase/migrations/008_overseer_worker_type.sql  # allows the dedicated Showrunner worker type
 supabase/migrations/009_provider_routing.sql  # provider routing (own | auto | nvidia) — /api/routing, /models
+supabase/migrations/010_seasons_and_notifications.sql  # seasons + notifications (/api/seasons, /api/notifications, /seasons)
+supabase/migrations/011_agent_messages_manager.sql  # lets the Management Team speak in agent_messages (it was rejected by the 007 check)
+supabase/migrations/012_chat_targets.sql  # direct agent chat: chat_messages.target_kind + client_msg_id
 docs/ENV.md             # split env reference (now includes supervisor vars + aliases)
 handoffs/               # mandatory handovers
 ```
@@ -175,7 +178,7 @@ handoffs/               # mandatory handovers
 - `/projects/[id]` — story bible + characters + locations + episodes
 - `/episodes/[id]` — episode detail, pipeline, tasks, scenes, approvals, artifacts
 - `/seasons` — **season-first approval**: the complete season package (per-episode synopses, cast, arcs, ending, open assumptions, production estimate), submit / approve / request changes / reject, the production-gate banner, and the in-app inbox
-- `/chat` — Agent Chat room where the director talks to the Script AI (it can write the store). The **Auto-work** button next to Send lets the AI keep working on a task with no human in the middle: it sends itself a real continuation turn after every answer (each one a transcript row), and stops on the model's own `LOOP DONE` signal, a 10-step cap, a bounded free-tier rate-limit wait budget, or the Stop button
+- `/chat` — Agent Chat room where the director talks to the Script AI (it can write the store). **TALKING TO** switches the conversation to any of the five canonical agents (Management Team / Script AI / Image AI / Voice AI / Showrunner), each with its real live availability and its own stored history; when an agent asks a peer for something, the real handoff and the peer's real answer are shown under the message and in the agent channel panel. The **Auto-work** button next to Send lets the AI keep working on a task with no human in the middle: it sends itself a real continuation turn after every answer (each one a transcript row), and stops on the model's own `LOOP DONE` signal, a 10-step cap, a bounded free-tier rate-limit wait budget, or the Stop button
 - `/studio` — **AI Studio** production channel: Script AI ↔ Image AI ↔ Voice AI coordinate, and the Showrunner reports back to the director (every message shows that agent's own thinking)
 - `/models` — AI model on/off switches **and the provider routing switch** (own runtimes / NVIDIA free models / auto), with the real NVIDIA probe and the per-agent route
 - `/agents` — Agent Room + live provider health probe (from Render)
@@ -212,13 +215,16 @@ handoffs/               # mandatory handovers
 - `GET|POST /api/artifacts`
 - Agent Chat (migration `005` + `006`):
   - `GET|POST /api/chat/rooms` · `PATCH /api/chat/rooms/:id` · `GET|POST /api/chat/rooms/:id/messages` · `GET /api/chat/store`
+- Direct agent chat — one room, five canonical agents, per-agent conversation history (migration `012`):
+  - `GET /api/chat/rooms/:id/targets` — the five canonical targets + their real live availability/provider/model
+  - `POST /api/chat/rooms/:id/message` — send one conversational turn to a chosen agent (`target` in the body, or `?target=`; `manager|script|image|voice|overseer`). The user message is persisted first, then the real backend is resolved for that target, then the real answer is persisted with the target kind, its backend metadata and any peer handoffs it actually delivered. `client_msg_id` is an optional UUID: a retried send with the same id returns the first turn instead of calling the model twice.
+  - `GET /api/chat/rooms/:id/conversation/:kind` — the conversation with one canonical agent only (history is preserved per target, so switching agents never mixes their messages), plus the room's real agent-to-agent channel rows
 - Provider routing (migration `009`):
   - `GET|PATCH /api/routing` — which model family answers each agent (`own` | `auto` | `nvidia`, plus per-slot overrides), the real NVIDIA probe result, and the same per-slot resolution the agents use. Unknown modes/slots are a 400; every change is audited as `routing.changed`.
 - AI Studio agent channel (migration `007`):
-  - `GET /api/agents/roster` — the four roles (Script/Image/Voice/Showrunner) with their REAL live status
+  - `GET /api/agents/roster` — the five roles (Management Team / Showrunner / Script AI / Image AI / Voice AI) with their REAL live status
   - `GET|POST /api/agents/rooms` · `PATCH /api/agents/rooms/:id` · `GET /api/agents/rooms/:id/messages`
   - `POST /api/agents/rooms/:id/dispatch` — run one production round (Script → Image → Voice → Showrunner); every turn reports what really happened, and offline agents are skipped with the real reason
-
 ## Agent handover rule
 
 Every agent that performs repository work MUST create or update a handover in `handoffs/` before finishing:
@@ -232,6 +238,8 @@ Every agent that performs repository work MUST create or update a handover in `h
 **NVIDIA free-model backup + provider routing + agent thinking — code complete, type/test/lint-verified 2026-10-08 (Render redeploy of `main` and migration `009` required).** Every agent (Script AI, Image AI, Voice AI, Showrunner and the Management Team) can now answer from **NVIDIA NIM** (`NVIDIA_API_KEY`, OpenAI-compatible, free tier) as a backup or, on request, for everything. `GET|PATCH /api/routing` persists one explicit decision (`own` | `auto` | `nvidia` + per-slot overrides) in `provider_routing`, and `/models` renders it with the real probe result and the per-agent route. Security is enforced server-side and unit-tested: the key is only sent to an allowlisted NIM host, only vetted catalog model ids are dispatchable, reasoning uses the model's own documented switch, JSON mode is never forced (it would suppress thinking), and a local sliding-window limiter protects the free tier with a real `429` + `Retry-After`. Thinking is now shown on `/chat` **and** `/studio` in an expanded **THINKING** block above each message. **Live NVIDIA calls HAVE now been exercised** (2026-10-08, with the workspace key): a real completion through `callAgent`/`nvidiaBackend` answered from `nvidia/nemotron-3-super-120b-a12b` in 555ms with a 92-char reasoning channel, and the retired pin was refused locally with `MODEL_RETIRED` and zero network calls. See the latest handover in `handoffs/`.
 
 **AI Studio multi-agent channel — code complete, build/type/test-verified 2026-09-30 (Render redeploy of `main` required).** Agents can now talk to each other. Migration `007` adds `chat_rooms.kind` (`director` | `studio`) and the `agent_messages` table; `POST /api/agents/rooms/:id/dispatch` runs one bounded production round where Script AI briefs Image AI, Image AI hands off to Voice AI, and the Showrunner (overseer) reports the real status to the director. Each agent is called only when it is genuinely ONLINE, only messages a model actually emitted are stored, and store writes go through the same additive allow-list as Agent Chat. New Kaggle notebooks for Image/Voice/Showrunner were generated by `scripts/kaggle-agent-notebook.ts`. The `/studio` page renders it. See the latest handover in `handoffs/`.
+
+**Direct agent chat — code complete, web+api typecheck / 473 tests / lint verified, migrations `011`+`012` applied to the live database 2026-10-10 (Render redeploy of `main` required for the routes to exist).** The chat page and backend now let the director open a single conversation room and choose which canonical agent to talk to: Management Team, Script AI, Image AI, Voice AI, or Showrunner. Availability, provider, model and worker health are loaded live from the backend per target (`GET /api/chat/rooms/:id/targets`), and the conversation history is stored per `chat_messages.target_kind`, so switching agents never mixes one agent's messages with another's. The Management Team answers as a normal conversational manager through its existing hosted path (no fake replies, no hidden production round), and its peer-directed `messages` are delivered through the existing agent-channel machinery (`runAgentTurn` → `insertChannelMessage` + `settleInbox`), so a handoff is a real persisted row that the receiving agent is actually called with — up to three peers per turn, and anything undelivered stays visibly `sent`. Migration `012` also backfills the 108 pre-existing transcript rows to the Script AI, the only agent the old single-agent route could reach, so no history disappears from the UI. The old `POST /api/chat/rooms/:id/messages` flow still works for backward compatibility, and `/chat` falls back to it (with a visible banner) while the API is one release behind. See the latest handover in `handoffs/`.
 
 **Production integration fix — code complete, build/type/test-verified 2026-09-28 (Render redeploy of `main` required).** The Vercel dashboard no longer hard-codes provider state: it renders only `GET /api/health` + `GET /api/workers` (Render API / Supabase / every provider, each with `ONLINE`/`OFFLINE`/`DEGRADED`/`NOT_CONFIGURED`/`STARTING`/`ERROR`/`UNKNOWN` + reason). Supabase detection now uses `SUPABASE_URL ?? SUPABASE_CONNECTION_STRING ?? NEXT_PUBLIC_SUPABASE_URL` **and a real lightweight query**; the `KAGGLE_SCRIPT_URL` probe path is gone; CORS always allows `https://ostra-studio-web.vercel.app` (never `*`); `apps/api` starts with `node --import tsx src/index.ts`. The Kaggle Script worker can still only reach `ONLINE` after `KAGGLE_API_TOKEN` + `KAGGLE_KERNEL_REF` are set on Render and `bettertrade/notebook7eae283a4a` registers + heartbeats — no live Kaggle run has been observed yet.
 

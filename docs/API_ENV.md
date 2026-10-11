@@ -178,6 +178,44 @@ POST  /api/chat/rooms/:id/messages    → body { content: string, note?: string 
 GET   /api/chat/store?projectId=      → { projects: [{id,slug,title}], snapshot }
 ```
 
+### Direct agent chat — `GET /api/chat/rooms/:id/targets` · `POST /api/chat/rooms/:id/message` · `GET /api/chat/rooms/:id/conversation/:kind`
+
+Backed by `chat_messages.target_kind` + `chat_messages.client_msg_id` (migration `012_chat_targets.sql`).
+One room, five canonical agents — Management Team, Script AI, Image AI, Voice AI, Showrunner — and each
+choice keeps its own history in the same table, so switching agents never mixes one agent's messages with
+another's. `/chat` renders it (the **TALKING TO** selector).
+
+```
+GET  /api/chat/rooms/:id/targets            → { room, targets: [{ kind, label, subtitle, accent, available,
+                                                provider, model, endpointHost, detail, candidates, backend }],
+                                                timestamp }
+POST /api/chat/rooms/:id/message            → body { content: string (≤8000), target: manager|script|image|
+                                                voice|overseer, note?, client_msg_id?: uuid }
+                                              → { user_message, message, applied, store, backend, target,
+                                                  agent, rejected, handoffs }
+GET  /api/chat/rooms/:id/conversation/:kind → { room, messages, target, agent, backend, channel,
+                                                channel_transcript, timestamp }
+```
+
+- `target` is required (body or `?target=`) and must be a canonical kind; a request can never name a
+  provider, endpoint or model. Anything else is a `400`.
+- Availability is the same resolution the send path uses — `GET …/targets` never hard-codes "online".
+- The user message is persisted BEFORE the model is called, so a transcript never loses what the human said.
+  Failures stay honest: no backend → `503 NO_AGENT_BACKEND` (and no assistant row), a failed call → `502` with
+  the real error, the metered NVIDIA tier → `429 RATE_LIMITED` + real `Retry-After`/`retry_after_sec`.
+- `handoffs` reports what really happened to each peer message the model emitted: `delivered` (the peer was
+  invoked with this message in its inbox and answered — `reply` carries its answer), `failed` (the call was
+  attempted and failed), or `sent` (queued — the peer was NOT invoked: offline, already invoked this turn, or
+  beyond the 3-peer-per-turn cap). Recursion is impossible: a receiving agent's own peer messages are stored
+  but not auto-delivered.
+- `client_msg_id` (optional UUID) makes a retried/double-tapped send idempotent — the first turn is returned
+  instead of calling the model twice.
+- Migration `011_agent_messages_manager.sql` widens `agent_messages.from_agent` / `to_agent` to accept
+  `manager`. Before it, every channel row the Management Team wrote — and every handoff addressed to it — was
+  rejected by the `007` check constraint at INSERT time and silently reported as "no row".
+- Migration `012` backfills pre-existing rows to `target_kind = 'script'`: they came from the original
+  single-agent room, whose only backend was the Script AI, so no history disappears from the UI.
+
 ### AI Studio — `GET /api/agents/roster` · `/api/agents/rooms*` · `POST /api/agents/rooms/:id/dispatch`
 
 Backed by migration `007` (`chat_rooms.kind='studio'` + the `agent_messages` table). This is the

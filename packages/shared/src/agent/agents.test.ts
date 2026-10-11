@@ -4,11 +4,15 @@ import { describe, it } from "node:test";
 import {
   AGENT_CHANNEL_ORDER,
   AGENT_ROSTER,
+  DIRECT_CHAT_TARGETS,
   agentLabel,
   agentProfile,
+  answerSourceLabel,
   buildAgentChannelPrompt,
+  buildDirectChatPrompt,
   inboxFor,
   renderChannelTranscript,
+  sharedModelNote,
   type ChannelMessage,
 } from "./agents.js";
 import { AGENT_ACTION_OPS, type AgentStoreSnapshot } from "./protocol.js";
@@ -110,6 +114,12 @@ describe("buildAgentChannelPrompt", () => {
     assert.match(prompt, /STORE CONTEXT/);
   });
 
+  it("lists the new season ops in the channel prompt too", () => {
+    const prompt = buildAgentChannelPrompt({ agent: "image", snapshot, messages: channel });
+    assert.match(prompt, /create_season/);
+    assert.match(prompt, /submit_season/);
+  });
+
   it("shows the agent its inbox and the channel", () => {
     const prompt = buildAgentChannelPrompt({ agent: "image", snapshot, messages: channel });
     assert.match(prompt, /YOUR INBOX \(addressed to Image AI\)/);
@@ -127,5 +137,95 @@ describe("buildAgentChannelPrompt", () => {
     assert.match(prompt, /Showrunner of Ostra Studio/);
     assert.match(prompt, /Report what each agent actually did/);
     assert.doesNotMatch(prompt, /Your peers are/);
+  });
+});
+
+describe("DIRECT_CHAT_TARGETS", () => {
+  it("offers every canonical agent exactly once, in selection order", () => {
+    assert.deepEqual(
+      DIRECT_CHAT_TARGETS.map((t) => t.kind),
+      ["manager", "script", "image", "voice", "overseer"]
+    );
+  });
+
+  it("describes every target with a non-empty subtitle", () => {
+    for (const target of DIRECT_CHAT_TARGETS) {
+      assert.ok(target.subtitle.trim().length > 0, `${target.kind} has no subtitle`);
+    }
+  });
+});
+
+describe("answerSourceLabel", () => {
+  it("names the real runtime that answered, never the roster default", () => {
+    assert.equal(
+      answerSourceLabel({ kind: "project_worker", provider: "kaggle", model: "Qwen/Qwen3-4B" }),
+      "kaggle · project worker"
+    );
+    assert.equal(
+      answerSourceLabel({ kind: "project_worker", provider: "kaggle", model: "Qwen/Qwen3-4B", workerType: "script" }),
+      "kaggle · script worker"
+    );
+    assert.equal(
+      answerSourceLabel({ kind: "hosted_nvidia", provider: "nvidia", model: "meta/llama-3.1-8b-instruct" }),
+      "NVIDIA NIM · meta/llama-3.1-8b-instruct"
+    );
+    assert.equal(
+      answerSourceLabel({ kind: "hosted_manager", provider: "openai", model: "gpt-4o-mini" }),
+      "openai · management team"
+    );
+    assert.equal(
+      answerSourceLabel({ kind: "hosted_fallback", provider: "openai", model: "gpt-4o-mini" }),
+      "openai · hosted fallback"
+    );
+  });
+});
+
+describe("sharedModelNote", () => {
+  it("admits when several roles share one hosted model", () => {
+    assert.match(sharedModelNote({ kind: "hosted_nvidia", provider: "nvidia", model: "m" }) ?? "", /Shared hosted model/);
+    assert.match(sharedModelNote({ kind: "hosted_manager", provider: "openai", model: "m" }) ?? "", /Shared hosted model/);
+  });
+
+  it("stays silent for a project worker, which is its own runtime", () => {
+    assert.equal(sharedModelNote({ kind: "project_worker", provider: "kaggle", model: "m" }), null);
+  });
+});
+
+describe("buildDirectChatPrompt", () => {
+  it("frames a private one-to-one conversation and asks for the JSON envelope", () => {
+    const prompt = buildDirectChatPrompt({ agent: "script", snapshot });
+    assert.match(prompt, /PRIVATE conversation with the human director/);
+    assert.match(prompt, /talking ONE-TO-ONE with the human director/);
+    assert.match(prompt, /"reply"/);
+    assert.match(prompt, /Put EVERY store change in `actions`/);
+    assert.match(prompt, /STORE CONTEXT/);
+    for (const op of AGENT_ACTION_OPS) assert.match(prompt, new RegExp(op));
+  });
+
+  it("names the peers a production agent may address", () => {
+    const prompt = buildDirectChatPrompt({ agent: "voice", snapshot });
+    assert.match(prompt, /Image AI/);
+    assert.match(prompt, /Showrunner/);
+  });
+
+  it("carries the director note when the room has one, and omits it otherwise", () => {
+    assert.match(
+      buildDirectChatPrompt({ agent: "script", snapshot, directorNote: "Keep it PG." }),
+      /DIRECTOR NOTE FOR THIS ROOM: Keep it PG\./
+    );
+    assert.doesNotMatch(buildDirectChatPrompt({ agent: "script", snapshot, directorNote: null }), /DIRECTOR NOTE/);
+  });
+
+  it("keeps the management team out of writing episodes itself", () => {
+    const prompt = buildDirectChatPrompt({ agent: "manager", snapshot });
+    assert.match(prompt, /you do not write the episodes yourself/);
+    assert.match(prompt, /never claim an agent did work you have not seen come back/);
+    assert.match(prompt, /`messages`/);
+  });
+
+  it("tells the Showrunner to report instead of producing", () => {
+    const prompt = buildDirectChatPrompt({ agent: "overseer", snapshot });
+    assert.match(prompt, /do NOT write story, art or audio yourself/);
+    assert.doesNotMatch(prompt, /talking ONE-TO-ONE/);
   });
 });

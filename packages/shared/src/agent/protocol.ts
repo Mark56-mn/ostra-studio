@@ -21,6 +21,8 @@ export const AGENT_ACTION_OPS = [
   "update_character",
   "create_location",
   "update_location",
+  "create_season",
+  "submit_season",
   "create_episode",
   "update_episode",
   "create_scene",
@@ -456,6 +458,8 @@ export const AGENT_ACTION_REFERENCE = `ACTIONS (all optional, additive only — 
 {"op":"update_character","data":{"name":"<existing name>","role":"...","description":"...","visual_ref":"..."}}
 {"op":"create_location","data":{"name":"...","description":"...","visual_ref":"..."}}
 {"op":"update_location","data":{"name":"<existing name>","description":"...","visual_ref":"..."}}
+{"op":"create_season","data":{"title":"...","premise":"...","episodes":[{"number":1,"title":"...","synopsis":"..."}],"characters":[{"name":"..."}],"arcs":["...","..."],"ending":"..."}}
+{"op":"submit_season"}
 {"op":"create_episode","data":{"title":"...","concept":"...","number":3}}
 {"op":"update_episode","data":{"number":<existing episode number>,"title":"...","concept":"...","outline":"...","script":"...","narration":"...","status":"idea|writing|scenes|imaging|voicing|rendering|qc|ready_for_review|approved|uploading|published|archived"}}
 {"op":"create_scene","data":{"episode_number":<existing episode number>,"title":"...","script_excerpt":"...","image_spec":"...","narration_segment":"...","duration_sec":6}}

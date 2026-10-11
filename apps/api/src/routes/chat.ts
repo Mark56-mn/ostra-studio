@@ -22,10 +22,31 @@
 
 import type { Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { buildAgentSystemPrompt, parseAgentResponse } from "@ostra/shared";
+import {
+  AGENT_ALL_KINDS,
+  DIRECT_CHAT_TARGETS,
+  agentLabel,
+  agentProfile,
+  buildAgentSystemPrompt,
+  buildDirectChatPrompt,
+  parseAgentResponse,
+  renderChannelTranscript,
+  type AgentKind,
+} from "@ostra/shared";
 import { requireSupabase } from "../lib/supabase.js";
-import { callAgent, publicBackend, resolveAgentBackend, type AgentMessage } from "../lib/agentRuntime.js";
+import {
+  callAgent,
+  publicBackend,
+  resolveAgentBackend,
+  resolveChannelBackend,
+  resolveManagerBackend,
+  type AgentMessage,
+} from "../lib/agentRuntime.js";
+import { deliverPeerMessages, loadChannel, type HandoffResult } from "../lib/agentChannel.js";
 import { applyStoreActions, readStoreSnapshot, type AppliedAction } from "../lib/storeActions.js";
+
+/** Longest direct conversation the model is shown, per target (bounds the prompt, never the call). */
+const DIRECT_HISTORY_LIMIT = 24;
 
 const MAX_CONTENT_CHARS = 8000;
 const HISTORY_LIMIT = 32;
@@ -242,6 +263,274 @@ export async function postMessage(req: Request, res: Response) {
     backend: publicBackend(backend),
     agent: status,
     rejected: reply.rejected,
+  });
+}
+
+/** Resolve one canonical target to its REAL live backend + status — the single source of truth for
+ * "who would answer this target right now", shared by the selector, the send route and the
+ * per-target transcript so they can never disagree. */
+async function resolveTarget(supa: SupabaseClient, target: AgentKind) {
+  return target === "manager"
+    ? resolveManagerBackend()
+    : await resolveChannelBackend(supa, target);
+}
+
+// ── GET /api/chat/rooms/:id/targets ──────────────────────────────────────────
+// The five canonical targets with their REAL live availability/provider/model. Availability is the
+// same resolution the send path uses — never a hard-coded "online".
+export async function listTargets(req: Request, res: Response) {
+  const supa = requireSupabase(res);
+  if (!supa) return;
+  const { id } = req.params as { id: string };
+  const room = await loadRoom(supa, id);
+  if (!room) return res.status(404).json({ error: "room not found" });
+
+  const targets = await Promise.all(
+    DIRECT_CHAT_TARGETS.map(async (t) => {
+      const kind = t.kind as AgentKind;
+      const profile = agentProfile(kind);
+      const { backend, status } = await resolveTarget(supa, kind);
+      return {
+        kind: t.kind,
+        label: profile.label,
+        subtitle: t.subtitle,
+        accent: profile.accent,
+        capabilities: profile.capabilities,
+        specialty: profile.specialty,
+        available: status.available,
+        provider: status.provider,
+        model: status.model,
+        endpointHost: status.endpointHost,
+        detail: status.detail,
+        candidates: status.candidates,
+        backend: backend ? publicBackend(backend) : null,
+      };
+    })
+  );
+  res.json({ room, targets, timestamp: new Date().toISOString() });
+}
+
+/** A client-supplied id that makes a retried/double-tapped send return the FIRST turn instead of
+ * running the model twice. Random UUIDs only — never used as a lookup key for anything else. */
+function isClientId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+// ── POST /api/chat/rooms/:id/message ─────────────────────────────────────────
+// One conversational turn with ONE chosen canonical agent. `target` is required (body or query) and
+// must be a canonical kind; the request can never name a provider, endpoint or model.
+export async function sendToAgent(req: Request, res: Response) {
+  const supa = requireSupabase(res);
+  if (!supa) return;
+  const { id } = req.params as { id: string };
+  const body = req.body as { content?: string; note?: string; target?: string; client_msg_id?: string } | null;
+  const rawTarget = (body?.target ?? (req.query.target as string | undefined) ?? "").toString();
+  const target = AGENT_ALL_KINDS.includes(rawTarget as AgentKind) ? (rawTarget as AgentKind) : null;
+  if (!target) return res.status(400).json({ error: `target must be one of: ${AGENT_ALL_KINDS.join(", ")}` });
+
+  const room = await loadRoom(supa, id);
+  if (!room) return res.status(404).json({ error: "room not found" });
+
+  const content = (body?.content ?? "").toString().trim();
+  if (!content) return res.status(400).json({ error: "content is required" });
+  if (content.length > MAX_CONTENT_CHARS) {
+    return res.status(400).json({ error: `content is too long (max ${MAX_CONTENT_CHARS} characters)` });
+  }
+
+  // Idempotency: a double tap / network retry with the same client id must not run the model twice.
+  const clientId = isClientId(body?.client_msg_id) ? body.client_msg_id : null;
+  if (clientId) {
+    const { data: prior } = await supa
+      .from("chat_messages")
+      .select("*")
+      .eq("room_id", id)
+      .eq("client_msg_id", clientId)
+      .order("created_at", { ascending: false })
+      .limit(2);
+    const priorRows = (prior ?? []) as Array<Record<string, unknown> & { id: string; role: string }>;
+    const priorUser = priorRows.find((r) => r.role === "user");
+    const priorAssistant = priorRows.find((r) => r.role === "assistant");
+    if (priorUser && priorAssistant) {
+      return res.json({
+        deduplicated: true,
+        user_message: priorUser,
+        message: { ...priorAssistant, actions: normalizeActions(priorAssistant.actions) },
+        applied: normalizeActions(priorAssistant.actions),
+        store: { changed: 0, failed: 0 },
+        target,
+      });
+    }
+  }
+
+  // 1) Persist the user message BEFORE calling the model — it survives any later failure.
+  const userInsert = await supa
+    .from("chat_messages")
+    .insert({ room_id: id, role: "user", content, actions: [], target_kind: target, client_msg_id: clientId })
+    .select()
+    .single();
+  if (userInsert.error) return res.status(400).json({ error: userInsert.error.message });
+  const userMessage = userInsert.data;
+  await supa.from("chat_rooms").update({ updated_at: new Date().toISOString() }).eq("id", id);
+
+  // 2) Resolve the REAL backend for this target. No backend → honest 503, no assistant row.
+  const { backend, status } = await resolveTarget(supa, target);
+  if (!backend) {
+    return res.status(503).json({
+      error: "NO_AGENT_BACKEND",
+      reason: `${agentLabel(target)} cannot answer right now — ${status.detail}`,
+      user_message: userMessage,
+      target,
+      agent: status,
+    });
+  }
+
+  // 3) Context: the store snapshot + THIS target's conversation history (per target_kind, so
+  //    switching agents never leaks one agent's transcript into another's).
+  const snapshot = await readStoreSnapshot(supa, room.project_id);
+  const { data: historyRows } = await supa
+    .from("chat_messages")
+    .select("role, content, created_at")
+    .eq("room_id", id)
+    .eq("target_kind", target)
+    .order("created_at", { ascending: false })
+    .limit(DIRECT_HISTORY_LIMIT);
+  const history = (historyRows ?? []).slice().reverse() as Array<{ role: string; content: string }>;
+
+  const messages: AgentMessage[] = [
+    { role: "system", content: buildDirectChatPrompt({ agent: target, snapshot, directorNote: body?.note ?? null }) },
+    ...history
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+  ];
+
+  const call = await callAgent(backend, messages);
+  if (!call.ok) {
+    // The failure is recorded ON the user's message so the transcript shows what really happened.
+    await supa.from("chat_messages").update({ error: { code: call.code, reason: call.error } }).eq("id", userMessage.id);
+    if (call.code === "RATE_LIMITED") {
+      const retryAfterSec = call.retryAfterSec ?? 60;
+      res.setHeader("Retry-After", String(retryAfterSec));
+      return res.status(429).json({
+        error: "RATE_LIMITED",
+        reason: `${agentLabel(target)} (${backend.provider} · ${backend.model}) ${call.error}`,
+        retry_after_sec: retryAfterSec,
+        user_message: userMessage,
+        target,
+        backend: publicBackend(backend),
+        agent: status,
+      });
+    }
+    return res.status(502).json({
+      error: call.code,
+      reason: `${agentLabel(target)} (${backend.provider} · ${backend.model}${backend.endpointHost ? ` · ${backend.endpointHost}` : ""}) ${call.error}`,
+      user_message: userMessage,
+      target,
+      backend: publicBackend(backend),
+      agent: status,
+    });
+  }
+
+  // 4) Interpret the answer, apply its store writes, persist the REAL reply and its metadata.
+  const reply = parseAgentResponse(call.content, call.reasoning);
+  const store = await applyStoreActions(supa, reply.actions, room.project_id, `agent:${target}`);
+  const backendInfo = { ...publicBackend(backend), latencyMs: call.latencyMs, parse: reply.parse, target_kind: target };
+
+  const assistantInsert = await supa
+    .from("chat_messages")
+    .insert({
+      room_id: id,
+      role: "assistant",
+      content: reply.reply || (reply.reasoning ? "(no final answer — the model's thinking is attached)" : "(the model returned no text)"),
+      reasoning: reply.reasoning || null,
+      actions: store.applied,
+      backend: backendInfo,
+      target_kind: target,
+      client_msg_id: clientId,
+    })
+    .select()
+    .single();
+  if (assistantInsert.error) return res.status(500).json({ error: assistantInsert.error.message });
+
+  await supa.from("chat_rooms").update({ updated_at: new Date().toISOString() }).eq("id", id);
+
+  // 5) Peer-directed messages are DELIVERED, not just claimed: each one is persisted in the agent
+  //    channel and the receiving agent is actually invoked with it (when it is genuinely online).
+  //    This is how a manager handoff becomes real work instead of a promise in prose.
+  const handoffs: HandoffResult[] = reply.messages.length
+    ? await deliverPeerMessages(supa, {
+        roomId: id,
+        projectId: room.project_id,
+        from: target,
+        messages: reply.messages,
+        backendInfo,
+      })
+    : [];
+
+  res.json({
+    user_message: userMessage,
+    message: { ...assistantInsert.data, actions: normalizeActions(assistantInsert.data.actions) },
+    applied: store.applied,
+    store: { changed: store.changed, failed: store.failed },
+    backend: publicBackend(backend),
+    target,
+    agent: status,
+    rejected: reply.rejected,
+    handoffs,
+  });
+}
+
+// ── GET /api/chat/rooms/:id/conversation/:kind ────────────────────────────────────
+// ONE target's transcript only. History is stored per `target_kind`, so switching agents in the UI
+// never shows one agent's messages under another's name.
+export async function listConversation(req: Request, res: Response) {
+  const supa = requireSupabase(res);
+  if (!supa) return;
+  const { id, kind } = req.params as { id: string; kind: string };
+  const target = kind && AGENT_ALL_KINDS.includes(kind as AgentKind) ? (kind as AgentKind) : null;
+  if (!target) return res.status(400).json({ error: `kind must be one of: ${AGENT_ALL_KINDS.join(", ")}` });
+
+  const room = await loadRoom(supa, id);
+  if (!room) return res.status(404).json({ error: "room not found" });
+
+  const { data, error } = await supa
+    .from("chat_messages")
+    .select("*")
+    .eq("room_id", id)
+    .eq("target_kind", target)
+    .order("created_at", { ascending: false })
+    .limit(MESSAGES_PAGE_LIMIT);
+  if (error) return res.status(500).json({ error: error.message });
+
+  const messages = (data ?? [])
+    .slice()
+    .reverse()
+    .map((row) => ({ ...(row as Record<string, unknown>), actions: normalizeActions((row as { actions?: unknown }).actions) }));
+
+  const { backend, status } = await resolveTarget(supa, target);
+
+  // The real inter-agent channel for this room, so the UI can show delivered handoffs and their
+  // real outcomes next to the conversation.
+  const channel = await loadChannel(supa, id);
+
+  res.json({
+    room,
+    messages,
+    target,
+    agent: status,
+    backend: backend ? publicBackend(backend) : null,
+    channel: channel.map((m) => ({
+      id: m.id,
+      from_agent: m.from_agent,
+      to_agent: m.to_agent,
+      kind: m.kind,
+      content: m.content,
+      status: m.status,
+      backend: m.backend,
+      error: m.error,
+      created_at: m.created_at,
+    })),
+    channel_transcript: renderChannelTranscript(channel),
+    timestamp: new Date().toISOString(),
   });
 }
 
