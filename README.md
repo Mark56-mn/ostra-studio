@@ -79,6 +79,10 @@ Duplicate protection: healthy check + in-progress lease + per-worker cooldown be
 
 The dashboard renders **only** backend state: `GET /api/health` (Render API, Supabase, every provider) and `GET /api/workers`. There are no hard-coded provider labels. `NEXT_PUBLIC_API_URL` missing → `RENDER API · NOT_CONFIGURED`; API unreachable → `BACKEND OFFLINE — Unable to reach Render API`; a configured-but-idle provider → `OFFLINE`/`NOT_CONFIGURED`; a real worker with a fresh heartbeat → `ONLINE`. See `docs/API_ENV.md` for the full response shape.
 
+## Master blueprint
+
+The version-controlled product and architecture north star is [`docs/MASTER_BLUEPRINT.md`](docs/MASTER_BLUEPRINT.md). It covers the multi-tenant SaaS vision, Story Bible, Director/specialist agents, durable autonomy and queues, provider/worker routing, 100 writing-only free credits, storage strategy, YouTube approval rules, security, acceptance criteria, and phased task roadmap. Read it alongside the existing implementation docs; where future-state goals differ from current code, inspect and document the gap rather than replacing working behavior.
+
 ## Repository instructions
 
 Each spec is mandatory before changing code:
