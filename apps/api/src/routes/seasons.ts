@@ -54,54 +54,6 @@ export type SeasonRow = {
   updated_at: string;
 };
 
-const SEASON_COLUMNS =
-  "id, project_id, title, premise, episode_count, episodes, characters, world, arcs, ending, assumptions, production_estimate, status, submitted_at, decided_at, decided_by, decision_note, created_at, updated_at";
-
-function isUuid(value: unknown): value is string {
-  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
-}
-
-function arr(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
-}
-
-/** Raise the real notification for a season event. Never throws — a failed inbox row is logged, not faked. */
-async function notify(
-  supa: SupabaseClient,
-  event: "submitted" | "approved" | "changes_requested" | "rejected",
-  season: { id: string; project_id: string; title: string },
-  dedupeKey: string | null
-) {
-  const n = seasonNotification(event, season);
-  if (!n) return;
-  await supa
-    .from("notifications")
-    .insert({
-      kind: n.kind,
-      project_id: season.project_id,
-      season_id: season.id,
-      title: n.title,
-      body: n.body,
-      severity: n.severity,
-      requires_action: n.requiresAction,
-      dedupe_key: dedupeKey,
-    })
-    .then(
-      () => undefined,
-      (e) => console.error("[seasons] notification insert failed", e?.message ?? e)
-    );
-}
-
-async function audit(supa: SupabaseClient, type: string, season: SeasonRow, actor: string, payload: Record<string, unknown>) {
-  await supa
-    .from("events")
-    .insert({ type, project_id: season.project_id, actor, payload: { season_id: season.id, season_title: season.title, ...payload } })
-    .then(
-      () => undefined,
-      (e) => console.error("[seasons] event insert failed", e?.message ?? e)
-    );
-}
-
 // ── GET /api/seasons?projectId= ─────────────────────────────────────────────
 export async function listSeasons(req: Request, res: Response) {
   const supa = requireSupabase(res);
@@ -293,6 +245,57 @@ export async function decideSeason(req: Request, res: Response) {
   res.json({ season: decided, gate: productionGate((siblings ?? []) as SeasonRow[], decided.project_id) });
 }
 
+const SEASON_COLUMNS =
+  "id, project_id, title, premise, episode_count, episodes, characters, world, arcs, ending, assumptions, production_estimate, status, submitted_at, decided_at, decided_by, decision_note, created_at, updated_at";
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+function arr(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+/** Raise the real notification for a season event. Never throws — a failed inbox row is logged, not faked. */
+async function notify(
+  supa: SupabaseClient,
+  event: "submitted" | "approved" | "changes_requested" | "rejected",
+  season: { id: string; project_id: string; title: string },
+  dedupeKey: string | null
+) {
+  const n = seasonNotification(event, season);
+  if (!n) return;
+  await supa
+    .from("notifications")
+    .insert({
+      kind: n.kind,
+      project_id: season.project_id,
+      season_id: season.id,
+      title: n.title,
+      body: n.body,
+      severity: n.severity,
+      requires_action: n.requiresAction,
+      dedupe_key: dedupeKey,
+    })
+    .then(
+      () => undefined,
+      (e) => console.error("[seasons] notification insert failed", e?.message ?? e)
+    );
+}
+
+async function audit(supa: SupabaseClient, type: string, season: SeasonRow, actor: string, payload: Record<string, unknown>) {
+  await supa
+    .from("events")
+    .insert({ type, project_id: season.project_id, actor, payload: { season_id: season.id, season_title: season.title, ...payload } })
+    .then(
+      () => undefined,
+      (e) => console.error("[seasons] event insert failed", e?.message ?? e)
+    );
+}
+
+
+
+// ── GET /api/notifications ──────────────────────────────────────────────────
 // ── GET /api/notifications ──────────────────────────────────────────────────
 export async function listNotifications(_req: Request, res: Response) {
   const supa = requireSupabase(res);
