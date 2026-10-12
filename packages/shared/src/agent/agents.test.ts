@@ -13,7 +13,9 @@ import {
   inboxFor,
   renderChannelTranscript,
   sharedModelNote,
+  summarizeRound,
   type ChannelMessage,
+  type RoundTurnLike,
 } from "./agents.js";
 import { AGENT_ACTION_OPS, type AgentStoreSnapshot } from "./protocol.js";
 
@@ -227,5 +229,94 @@ describe("buildDirectChatPrompt", () => {
     const prompt = buildDirectChatPrompt({ agent: "overseer", snapshot });
     assert.match(prompt, /do NOT write story, art or audio yourself/);
     assert.doesNotMatch(prompt, /talking ONE-TO-ONE/);
+  });
+});
+
+describe("summarizeRound", () => {
+  const completed: RoundTurnLike = {
+    agent: "script",
+    ok: true,
+    backend: { kind: "hosted_nvidia", provider: "nvidia", model: "meta/llama-3.1-70b-instruct" },
+    reply: "Episode 1 drafted.",
+    outgoing: 1,
+    applied: [{ op: "create_episode", ok: true, ref: null }],
+    error: null,
+  };
+
+  it("calls a stage that produced real output completed", () => {
+    const { outcome, stages } = summarizeRound([completed]);
+    assert.equal(outcome, "completed");
+    assert.equal(stages[0].outcome, "completed");
+  });
+
+  it("does not confuse a backend with the completed stage's backend", () => {
+    const { stages } = summarizeRound([completed]);
+    assert.deepEqual(stages[0].backend, { provider: "nvidia", model: "meta/llama-3.1-70b-instruct" });
+  });
+
+  it("reports an answered-but-empty stage as blocked, with the real reason", () => {
+    const stalled: RoundTurnLike = {
+      agent: "image",
+      ok: true,
+      backend: { kind: "hosted_nvidia", provider: "nvidia", model: "sdxl" },
+      reply: null,
+      outgoing: 0,
+      applied: [],
+      error: null,
+    };
+    const { outcome, stages, blockers } = summarizeRound([completed, stalled]);
+    assert.equal(outcome, "partial");
+    assert.equal(stages[1].outcome, "blocked");
+    assert.match(blockers[0], /Image AI answered but produced no reply/);
+  });
+
+  it("counts a failed call and an offline stage as blocked overall", () => {
+    const failed: RoundTurnLike = {
+      agent: "voice",
+      ok: false,
+      backend: { kind: "hosted_nvidia", provider: "nvidia", model: "tts" },
+      reply: null,
+      outgoing: 0,
+      applied: [],
+      error: "HTTP_ERROR: 500 upstream",
+    };
+    const offline: RoundTurnLike = {
+      agent: "overseer",
+      ok: false,
+      backend: null,
+      reply: null,
+      outgoing: 0,
+      applied: [],
+      error: "Showrunner is OFFLINE"
+    };
+    const { outcome, stages, blockers } = summarizeRound([completed, failed, offline]);
+    assert.equal(outcome, "blocked");
+    assert.equal(stages[1].outcome, "failed");
+    assert.equal(stages[2].outcome, "skipped_offline");
+    assert.equal(blockers.length, 2);
+    assert.match(blockers[1], /was never invoked/);
+  });
+
+  it("lists only actually-applied store write refs as artifacts", () => {
+    const turn: RoundTurnLike = {
+      ...completed,
+      reply: null,
+      outgoing: 2,
+      applied: [
+        { op: "create_character", ok: true, ref: "char-9" },
+        { op: "create_location", ok: false, ref: null },
+        { op: "create_episode", ok: true, ref: "ep-1" },
+      ],
+    };
+    const { stages } = summarizeRound([turn]);
+    assert.deepEqual(stages[0].artifacts, ["char-9", "ep-1"]);
+    assert.match(stages[0].reason, /2 store write/);
+  });
+
+  it("reports a peer-message-only turn as completed", () => {
+    const turn: RoundTurnLike = { ...completed, reply: null, applied: [] };
+    const { stages } = summarizeRound([turn]);
+    assert.equal(stages[0].outcome, "completed");
+    assert.match(stages[0].reason, /1 peer message/);
   });
 });

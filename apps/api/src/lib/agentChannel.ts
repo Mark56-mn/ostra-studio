@@ -21,6 +21,7 @@ import {
   agentLabel,
   buildAgentChannelPrompt,
   parseAgentResponse,
+  summarizeRound,
   type AgentKind,
   type AgentOutboundMessage,
   type AgentStoreSnapshot,
@@ -386,7 +387,13 @@ export async function runProductionRound(
     /** Set false to skip the management team's turn (it is skipped when it is not configured). */
     manager?: boolean;
   }
-): Promise<{ turns: AgentTurnResult[]; changed: number; failedWrites: number }> {
+): Promise<{
+    turns: AgentTurnResult[];
+    changed: number;
+    failedWrites: number;
+    /** Honest per-stage outcome, computed by the pure shared rule `summarizeRound`. */
+    summary: ReturnType<typeof summarizeRound>;
+  }> {
   const turns: AgentTurnResult[] = [];
 
   if (args.manager !== false) {
@@ -404,5 +411,8 @@ export async function runProductionRound(
   }
   const applied = turns.flatMap((t) => t.applied);
   const changed = applied.filter((a) => a.ok).length;
-  return { turns, changed, failedWrites: applied.length - changed };
+  // The honest, testable verdict of the round: per-stage outcome + overall + real blockers. This is
+  // the shape the director-facing UI and the audited event rely on, so it must come from ONE rule.
+  const summary = summarizeRound(turns);
+  return { turns, changed, failedWrites: applied.length - changed, summary };
 }

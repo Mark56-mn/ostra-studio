@@ -523,13 +523,49 @@ export async function probeHostedModel(
  * The backend for a production-channel role. The Showrunner prefers a dedicated `overseer` notebook
  * and falls back to the Script AI worker (a real model, just not a dedicated overseer) — the status
  * `detail` always says which one actually answered.
+ *
+ * The Management Team is hosted-only, but the ROUTING DECISION still decides who answers it: with a
+ * `MANAGER_API_KEY` the dedicated hosted manager answers; in `auto` mode without one the configured
+ * NVIDIA NIM backup answers (a manager that cannot be resolved no longer stalls the whole production
+ * loop — a round on 2026-10-12 proved the NIM path answers and a direct chat on the same release did
+ * not, because resolution differed by route). `own`/`nvidia` modes keep their strict meaning, and an
+ * unconfigured `auto` still refuses honestly rather than pretending.
  */
 export async function resolveChannelBackend(supa: SupabaseClient, agent: AgentKind) {
   const { settings } = await readRouting(supa);
   const mode = routingModeFor(settings, agent);
   // Forced NVIDIA overrides EVERY slot, including the hosted management team.
   if (mode === "nvidia") return resolveNvidiaOnly(agent);
-  if (agent === "manager") return resolveManagerBackend();
+  if (agent === "manager") {
+    const dedicated = resolveManagerBackend();
+    if (dedicated.backend) return dedicated;
+    if (mode !== "auto") return dedicated;
+    // auto + no MANAGER_API_KEY: the same backup logic every other agent already gets, so one
+    // routing decision decides who answers instead of two different rules per route.
+    const nvidia = nvidiaConfig();
+    if (!nvidia.configured) {
+      return {
+        ...dedicated,
+        status: {
+          ...dedicated.status,
+          detail: `${dedicated.status.detail} No NVIDIA_API_KEY is set either, so no hosted backup can answer the Management Team in auto mode.`,
+        },
+      };
+    }
+    const backend = nvidiaBackend("manager");
+    return {
+      backend,
+      status: {
+        available: true,
+        kind: "hosted_nvidia",
+        provider: "nvidia",
+        model: backend.model,
+        endpointHost: backend.endpointHost,
+        detail: `${dedicated.status.detail} Routing mode is "auto", so the NVIDIA NIM backup answers the Management Team instead.`,
+        candidates: [],
+      },
+    };
+  }
   if (agent === "overseer") {
     return resolveAgentBackendFor(supa, ["overseer", "script"], { label: "Showrunner", slot: "overseer" });
   }

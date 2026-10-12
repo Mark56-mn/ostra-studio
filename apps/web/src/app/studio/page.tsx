@@ -22,6 +22,7 @@ import {
   type AgentTurnResult,
   type ChannelMessage,
   type ProjectRef,
+  type RoundSummary,
   type RosterEntry,
   type StudioRoom,
 } from "@/lib/agents";
@@ -43,6 +44,7 @@ export default function StudioPage() {
   const [elapsed, setElapsed] = useState(0);
   const [turns, setTurns] = useState<AgentTurnResult[] | null>(null);
   const [summary, setSummary] = useState<{ changed: number; failed: number } | null>(null);
+  const [roundSummary, setRoundSummary] = useState<RoundSummary | null>(null);
   const [newRoomTitle, setNewRoomTitle] = useState("");
   const [newRoomProject, setNewRoomProject] = useState("");
 
@@ -123,6 +125,7 @@ export default function StudioPage() {
     setErr(null);
     setTurns(null);
     setSummary(null);
+    setRoundSummary(null);
     setElapsed(0);
     setRunning(true);
     runningRef.current = true;
@@ -139,6 +142,7 @@ export default function StudioPage() {
       setRoster(res.data.roster);
       setTurns(res.data.turns);
       setSummary({ changed: res.data.changed, failed: res.data.failedWrites });
+      setRoundSummary(res.data.summary ?? null);
       await refreshRooms();
     } finally {
       runningRef.current = false;
@@ -406,6 +410,28 @@ export default function StudioPage() {
                     <div className="rounded-lg border border-white/[0.06] bg-[#070A14]/60 px-3 py-2 text-[11px] text-[#9AA3C0]">
                       {summary.changed} store change{summary.changed === 1 ? "" : "s"} applied
                       {summary.failed > 0 ? `, ${summary.failed} refused` : ""}
+                    </div>
+                  )}
+                  {roundSummary && (
+                    <div
+                      className={`rounded-lg border px-3 py-2 text-[11px] leading-4 ${
+                        roundSummary.outcome === "completed"
+                          ? "border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-200"
+                          : roundSummary.outcome === "partial"
+                            ? "border-amber-500/25 bg-amber-500/[0.06] text-amber-200"
+                            : "border-red-500/25 bg-red-500/[0.06] text-red-200"
+                      }`}
+                    >
+                      <span className="font-semibold uppercase tracking-wide">round {roundSummary.outcome}</span>
+                      {roundSummary.blockers.length > 0 && (
+                        <ul className="mt-1 space-y-0.5">
+                          {roundSummary.blockers.map((b, i) => (
+                            <li key={i} className="text-[11px] leading-4">
+                              · {b}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </div>
                   )}
                   {turns.map((t) => (

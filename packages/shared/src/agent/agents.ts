@@ -404,3 +404,109 @@ export function buildDirectChatPrompt(args: {
     .filter((line, i, arr) => !(line === "" && arr[i - 1] === ""))
     .join("\n");
 }
+
+// ── Production-round outcome ──────────────────────────────────────────────
+// A round's response must state what each stage ACTUALLY did instead of leaving the director to
+// infer it from prose. The rule is pure so it is unit-testable without a database or a network.
+
+/** What one stage of a production round really did. Never optimistic. */
+export type StageOutcome = "completed" | "blocked" | "skipped_offline" | "failed";
+
+/** One production agent's honest stage summary. */
+export type RoundStage = {
+  agent: AgentKind;
+  outcome: StageOutcome;
+  /** Real backend that answered (provider/model), or null when nothing answered. */
+  backend: { provider: string; model: string } | null;
+  /** Human-readable reason, always stated — never guessed. */
+  reason: string;
+  /** Refs of actually-applied (ok) store writes, for artifact linkage downstream. */
+  artifacts: string[];
+};
+
+/** The minimal shape the round summary needs from one agent turn — the real `AgentTurnResult`. */
+export type RoundTurnLike = {
+  agent: string;
+  ok: boolean;
+  backend: { kind: string; provider: string; model: string } | null;
+  reply: string | null;
+  outgoing: number;
+  applied: ReadonlyArray<{ op: string; ok: boolean; ref: string | null }>;
+  error: string | null;
+};
+
+/**
+ * Summarize one production round per stage.
+ *
+ *  - A turn with a real backend and any real output (reply, peer messages, or applied writes) is
+ *    `completed` — the stage spoke and/or produced something verifiable.
+ *  - A turn whose backend exists but whose call itself failed is `failed`, with the real reason.
+ *  - A turn with NO backend is `skipped_offline` — nothing was asked, nothing pretended.
+ *  - `blocked` is reserved for the honest middle case: the backend answered but produced NO reply,
+ *    NO peer message and NO store write — the stage consumed a model call and resolved nothing. That
+ *    is the exact shape of the recorded wait-stall, and it must be visible, not hidden behind prose.
+ *  - `artifacts` lists the refs of actually-applied (ok) store writes, so a downstream stage can be
+ *    told which artifact ids exist instead of a natural-language "it is written somewhere".
+ */
+export function summarizeRound(turns: ReadonlyArray<RoundTurnLike>): {
+  stages: RoundStage[];
+  /** `completed` when every stage answered with real output; `partial` when a stage resolved nothing; `blocked` when a stage failed or was skipped. */
+  outcome: "completed" | "partial" | "blocked";
+  blockers: string[];
+} {
+  const stages = turns.map((t): RoundStage => {
+    const agent = (t.agent ?? "unknown") as AgentKind;
+    const label = agentLabel(agent);
+    const appliedOk = t.applied.filter((a) => a.ok);
+    const artifacts = appliedOk.map((a) => a.ref).filter((r): r is string => typeof r === "string" && r.length > 0);
+    const produced = Boolean(t.reply?.trim()) || t.outgoing > 0 || appliedOk.length > 0;
+
+    if (!t.backend) {
+      return {
+        agent,
+        outcome: "skipped_offline",
+        backend: null,
+        reason: t.error ? `${label} was never invoked: ${t.error}` : `${label} was never invoked: no backend is available.`,
+        artifacts: [],
+      };
+    }
+    if (!t.ok) {
+      return {
+        agent,
+        outcome: "failed",
+        backend: { provider: t.backend.provider, model: t.backend.model },
+        reason: t.error ? `${label} call failed: ${t.error}` : `${label} call failed.`,
+        artifacts,
+      };
+    }
+    if (!produced) {
+      return {
+        agent,
+        outcome: "blocked",
+        backend: { provider: t.backend.provider, model: t.backend.model },
+        reason: `${label} answered but produced no reply, no peer message and no store write — the stage resolved nothing this round.`,
+        artifacts,
+      };
+    }
+    return {
+      agent,
+      outcome: "completed",
+      backend: { provider: t.backend.provider, model: t.backend.model },
+      reason:
+        appliedOk.length > 0
+          ? `${label} completed: ${artifacts.length} store write(s) applied.`
+          : t.outgoing > 0
+            ? `${label} completed: answered and sent ${t.outgoing} peer message(s).`
+            : `${label} completed: answered the director.`,
+      artifacts,
+    };
+  });
+
+  const blockers = stages
+    .filter((s) => s.outcome === "blocked" || s.outcome === "failed" || s.outcome === "skipped_offline")
+    .map((s) => `${agentLabel(s.agent)}: ${s.reason}`);
+  const anyFailed = stages.some((s) => s.outcome === "failed" || s.outcome === "skipped_offline");
+  const anyBlocked = stages.some((s) => s.outcome === "blocked");
+  const outcome = anyFailed ? ("blocked" as const) : anyBlocked ? ("partial" as const) : ("completed" as const);
+  return { stages, outcome, blockers };
+}

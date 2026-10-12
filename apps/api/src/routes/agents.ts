@@ -231,13 +231,17 @@ export async function dispatchRound(req: Request, res: Response) {
     return res.status(400).json({ error: `brief is too long (max ${MAX_BRIEF_CHARS} characters)` });
   }
 
-  // 1) Persist the director's brief first — it must survive any model failure.
+  // 1) Persist the director's brief first — it must survive any model failure. It is addressed to
+  //    `all` so EVERY production agent receives the director's actual instruction in its inbox: a
+  //    script-only brief was the recorded stall (Voice awaited an excerpt and Image awaited specs
+  //    that had been announced only to Script AI). `all` is an allowed recipient of the channel
+  //    (migration 011) and lands in every role's inbox via `inboxFor`.
   if (brief) {
     const row = await insertChannelMessage(supa, {
       room_id: id,
       project_id: room.project_id,
       from_agent: "director",
-      to_agent: "script",
+      to_agent: "all",
       kind: "brief",
       content: brief,
       status: "sent",
@@ -256,11 +260,22 @@ export async function dispatchRound(req: Request, res: Response) {
 
   await supa.from("chat_rooms").update({ updated_at: new Date().toISOString() }).eq("id", id);
 
+  // Constraint 20 (auditable): the round's honest verdict is persisted as ONE event row. `details`
+  // carries the full structured summary (per-stage outcome, backend, reason, artifact refs) so an
+  // operator can later answer "what did this round actually do" without re-reading the channel.
+  await supa.from("events").insert({
+    type: "production.round",
+    project_id: room.project_id,
+    actor: "system",
+    payload: { room_id: id, ...result.summary },
+  });
+
   const [messages, roster] = await Promise.all([loadChannel(supa, id), rosterWithStatus(supa)]);
   res.json({
     turns: result.turns,
     changed: result.changed,
     failedWrites: result.failedWrites,
+    summary: result.summary,
     messages,
     roster,
   });

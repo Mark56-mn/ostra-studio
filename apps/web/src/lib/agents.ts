@@ -89,10 +89,26 @@ export async function fetchManagementPolicy(): Promise<FetchResult<ManagementPol
   }
 }
 
+export type RoundSummaryStage = {
+  agent: string;
+  outcome: "completed" | "blocked" | "skipped_offline" | "failed";
+  backend: { provider: string; model: string } | null;
+  reason: string;
+  artifacts: string[];
+};
+
+export type RoundSummary = {
+  stages: RoundSummaryStage[];
+  outcome: "completed" | "partial" | "blocked";
+  blockers: string[];
+};
+
 export type DispatchResponse = {
   turns: AgentTurnResult[];
   changed: number;
   failedWrites: number;
+  /** Honest per-stage verdict of the round, computed by the shared `summarizeRound` rule. */
+  summary?: RoundSummary;
   messages: ChannelMessage[];
   roster: RosterEntry[];
 };
